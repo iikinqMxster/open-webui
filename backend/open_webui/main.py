@@ -1296,20 +1296,31 @@ async def chat_completion(
                     # Insert chat files from user message if any
                     user_message_files = user_message.get('files', [])
                     if user_message_files:
+                        input_file_ids = [
+                            file_item.get('id')
+                            for file_item in user_message_files
+                            if file_item.get('type') == 'file'
+                        ]
                         try:
                             await Chats.insert_chat_files(
                                 chat_id,
                                 user_message_id,
-                                [
-                                    file_item.get('id')
-                                    for file_item in user_message_files
-                                    if file_item.get('type') == 'file'
-                                ],
+                                input_file_ids,
                                 user.id,
                             )
                         except Exception as e:
                             log.debug(f'Error inserting chat files: {e}')
                             pass
+                        # Auto-provision the chat's terminal container and sync
+                        # the newly attached files (one-way) into ~/input.
+                        try:
+                            from open_webui.utils.terminal_sync import schedule_chat_file_sync
+
+                            await schedule_chat_file_sync(
+                                request, user, chat_id, form_data.get('terminal_id'), input_file_ids
+                            )
+                        except Exception as e:
+                            log.debug(f'Error scheduling terminal file sync: {e}')
 
                     if initial_title_generation is not None and all_assistant_ids:
                         title_metadata = {
@@ -1394,20 +1405,31 @@ async def chat_completion(
                     # Insert chat files from user message if any
                     user_message_files = user_message.get('files', [])
                     if user_message_files:
+                        input_file_ids = [
+                            file_item.get('id')
+                            for file_item in user_message_files
+                            if file_item.get('type') == 'file'
+                        ]
                         try:
                             await Chats.insert_chat_files(
                                 chat_id,
                                 user_message.get('id'),
-                                [
-                                    file_item.get('id')
-                                    for file_item in user_message_files
-                                    if file_item.get('type') == 'file'
-                                ],
+                                input_file_ids,
                                 user.id,
                             )
                         except Exception as e:
                             log.debug(f'Error inserting chat files: {e}')
                             pass
+                        # Auto-provision the chat's terminal container and sync
+                        # the newly attached files (one-way) into ~/input.
+                        try:
+                            from open_webui.utils.terminal_sync import schedule_chat_file_sync
+
+                            await schedule_chat_file_sync(
+                                request, user, chat_id, form_data.get('terminal_id'), input_file_ids
+                            )
+                        except Exception as e:
+                            log.debug(f'Error scheduling terminal file sync: {e}')
 
                     # Save ALL assistant placeholders
                     user_message_id = metadata.get('user_message_id')

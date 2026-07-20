@@ -2030,6 +2030,17 @@ class ChatTable:
             all_chat_files = result.scalars().all()
             return [ChatFileModel.model_validate(chat_file) for chat_file in all_chat_files]
 
+    async def get_chat_files_by_chat_id(
+        self, chat_id: str, db: AsyncSession | None = None
+    ) -> list[ChatFileModel]:
+        """All files linked to a chat (across messages), oldest first."""
+        async with get_async_db_context(db) as session:
+            result = await session.execute(
+                select(ChatFile).filter_by(chat_id=chat_id).order_by(ChatFile.created_at.asc())
+            )
+            all_chat_files = result.scalars().all()
+            return [ChatFileModel.model_validate(chat_file) for chat_file in all_chat_files]
+
     async def delete_chat_file(self, chat_id: str, file_id: str, db: AsyncSession | None = None) -> bool:
         try:
             async with get_async_db_context(db) as session:

@@ -60,6 +60,23 @@ export const getTerminalConfig = async (
 	return res.json().catch(() => null);
 };
 
+export const syncTerminalFiles = async (
+	baseUrl: string,
+	apiKey: string,
+	sessionId?: string
+): Promise<{ synced: number; skipped: number } | null> => {
+	// One-way sync of the chat's attached files into the container's ~/input.
+	// Only meaningful for system terminals proxied through Open WebUI (the
+	// /sync endpoint lives on the OWUI backend, not on a direct terminal URL).
+	if (!baseUrl.includes('/api/v1/terminals/')) return null;
+	const url = `${baseUrl.replace(/\/$/, '')}/sync`;
+	const headers: Record<string, string> = bearerHeaders(apiKey);
+	if (sessionId) headers['X-Session-Id'] = sessionId;
+	const res = await fetch(url, { method: 'POST', headers }).catch(() => null);
+	if (!res || !res.ok) return null;
+	return res.json().catch(() => null);
+};
+
 export const getCwd = async (
 	baseUrl: string,
 	apiKey: string,

@@ -16,6 +16,7 @@
 	import {
 		getCwd,
 		getTerminalConfig,
+		syncTerminalFiles,
 		listFiles,
 		readFile,
 		downloadFileBlob,
@@ -250,6 +251,17 @@
 
 	// Detect terminal or chat changes — the explicit store references ensure
 	// Svelte re-runs this block when any of them update.
+	// One-way sync of the chat's attached files into the container's ~/input.
+	// Fire-and-forget on (first) open so a freshly provisioned per-chat container
+	// is populated; no-op for direct (non-proxied) user terminals.
+	let lastSyncedChatId: string | null = null;
+	const maybeSyncInputFiles = (terminal: { url: string; key: string } | null) => {
+		if (!terminal || !chatId) return;
+		if (lastSyncedChatId === chatId) return;
+		lastSyncedChatId = chatId;
+		syncTerminalFiles(terminal.url, terminal.key, chatId).catch(() => {});
+	};
+
 	// The `mounted` flag prevents the initial run from racing with onMount.
 	let prevTerminalUrl = '';
 	let prevChatId = chatId;
@@ -277,6 +289,7 @@
 				loading = true;
 				error = null;
 				entries = [];
+				maybeSyncInputFiles(terminal);
 				(async () => {
 					if (terminalChanged) {
 						const config = await getTerminalConfig(terminal.url, terminal.key);
@@ -882,6 +895,9 @@
 
 		if (!handledDisplayFile) {
 			loading = true;
+
+			// Populate the per-chat container's ~/input on first open.
+			maybeSyncInputFiles(terminal);
 
 			// Discover server features on initial mount
 			const config = await getTerminalConfig(terminal.url, terminal.key);

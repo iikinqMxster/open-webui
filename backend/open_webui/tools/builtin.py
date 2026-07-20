@@ -3802,3 +3802,90 @@ async def delete_calendar_event(
     except Exception as e:
         log.exception(f'delete_calendar_event error: {e}')
         return json.dumps({'error': str(e)})
+
+
+# =============================================================================
+# TERMINAL CONTAINER
+# =============================================================================
+
+
+async def create_terminal(
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __chat_id__: str = None,
+    __event_emitter__=None,
+) -> str:
+    """
+    Create or reuse this chat's terminal container and sync the chat's attached files into it.
+
+    The container is scoped to this chat (one container per chat) and this call is idempotent:
+    if the chat already has a running container it is reused, not recreated. Files the user
+    attached to the chat are copied one-way into the container's ~/input directory so code you
+    run can read them. Write generated files to ~/output. To display a generated ~/output file
+    in the chat, output a markdown image or link whose URL follows output_view_url_template
+    (replace <name> with the file's name), e.g. ![chart](/api/v1/terminals/ID/files/view?path=~/output/chart.png).
+
+    Call this before running commands or reading uploaded files in the terminal.
+
+    :return: JSON with the terminal status, the number of files synced into ~/input, the input/output directory paths, and a URL template for rendering ~/output files inline in chat.
+    """
+    try:
+        from open_webui.models.users import UserModel
+        from open_webui.utils.terminal_sync import (
+            INPUT_DIR,
+            OUTPUT_DIR,
+            resolve_terminal_connection,
+            sync_chat_files_to_terminal,
+        )
+
+        metadata = __metadata__ or {}
+        chat_id = __chat_id__ or metadata.get('chat_id')
+        terminal_id = metadata.get('terminal_id')
+        user = UserModel(**__user__) if __user__ else None
+
+        if not terminal_id:
+            return json.dumps({'error': 'No terminal is configured for this chat.'})
+        if not chat_id:
+            return json.dumps({'error': 'No chat id available for this request.'})
+        if user is None:
+            return json.dumps({'error': 'No user context available.'})
+
+        connection = await resolve_terminal_connection(user, terminal_id)
+        if connection is None:
+            return json.dumps({'error': 'Terminal is unavailable or access is denied.'})
+
+        # Syncing a file provisions the per-chat container lazily (idempotent).
+        result = await sync_chat_files_to_terminal(__request__, user, chat_id, terminal_id)
+
+        # Nudge the file panel to refresh so ~/input / ~/output are shown.
+        if __event_emitter__:
+            try:
+                await __event_emitter__({'type': 'terminal:sync', 'data': {'chat_id': chat_id}})
+            except Exception:
+                pass
+
+        view_template = (
+            f'/api/v1/terminals/{terminal_id}/files/view?path={OUTPUT_DIR}/<name>'
+            f'&x_session_id={chat_id}'
+        )
+        return json.dumps(
+            {
+                'status': 'ready',
+                'terminal_id': terminal_id,
+                'input_dir': INPUT_DIR,
+                'output_dir': OUTPUT_DIR,
+                'files_synced': result.get('synced', 0),
+                'files_skipped': result.get('skipped', 0),
+                'note': (
+                    f'Uploaded files are available in {INPUT_DIR}. Write any generated files to '
+                    f'{OUTPUT_DIR}. To show a generated file in the chat, output a markdown image or '
+                    f'link using output_view_url_template with <name> replaced by the file name.'
+                ),
+                'output_view_url_template': view_template,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        log.exception(f'create_terminal error: {e}')
+        return json.dumps({'error': str(e)})

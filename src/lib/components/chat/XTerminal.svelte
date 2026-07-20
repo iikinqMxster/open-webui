@@ -98,6 +98,9 @@
 
 				const wsBase = base.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
 				wsUrl = `${wsBase}/terminals/${info.serverId}/api/terminals/${sessionId}`;
+				// Scope the interactive shell to this chat's per-chat container
+				// (a browser WebSocket handshake can't set the X-Session-Id header).
+				if (chatId) wsUrl += `?x_session_id=${encodeURIComponent(chatId)}`;
 			}
 
 			ws = new WebSocket(wsUrl);

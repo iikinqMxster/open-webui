@@ -50,6 +50,7 @@ from open_webui.tools.builtin import (
     create_automation,
     create_calendar_event,
     create_tasks,
+    create_terminal,
     delete_automation,
     delete_calendar_event,
     delete_memory,
@@ -491,6 +492,7 @@ async def get_builtin_tools(
         'image_generation.enable',
         'images.edit.enable',
         'code_interpreter.enable',
+        'terminal_container.enable',
         'notes.enable',
         'channels.enable',
         'automations.enable',
@@ -616,6 +618,18 @@ async def get_builtin_tools(
         and await has_user_permission('code_interpreter')
     ):
         builtin_functions.append(execute_code)
+
+    # Terminal container tool — let the model create/ensure this chat's per-chat
+    # terminal container and sync attached files into ~/input. Only offered when a
+    # terminal is actually wired to this chat (an admin-configured, access-granted
+    # connection surfaced as metadata['terminal_id']) and the model allows it.
+    if (
+        is_builtin_tool_enabled('terminal')
+        and config.get('terminal_container.enable')
+        and get_model_capability('terminal')
+        and extra_params.get('__metadata__', {}).get('terminal_id')
+    ):
+        builtin_functions.append(create_terminal)
 
     # Notes tools - search, view, create, and update user's notes
     if is_builtin_tool_enabled('notes') and config.get('notes.enable') and await has_user_permission('notes'):

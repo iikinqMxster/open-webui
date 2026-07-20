@@ -392,6 +392,10 @@ try:
 except Exception:
     TERMINAL_PROXY_HEADERS = {}
 
+# When enabled, the model gets a built-in `create_terminal` tool and chats with
+# attached files auto-provision + sync into their per-chat terminal container.
+ENABLE_TERMINAL_CONTAINER = os.getenv('ENABLE_TERMINAL_CONTAINER', 'True').lower() == 'true'
+
 ####################################
 # Code Interpreter
 ####################################
@@ -2755,6 +2759,7 @@ DEFAULT_CONFIG = {
     'tool_server.connections': TOOL_SERVER_CONNECTIONS,
     'oauth.client.timeout': OAUTH_CLIENT_TIMEOUT,
     'terminal_server.connections': TERMINAL_SERVER_CONNECTIONS,
+    'terminal_container.enable': ENABLE_TERMINAL_CONTAINER,
     'code_execution.enable': ENABLE_CODE_EXECUTION,
     'code_execution.engine': CODE_EXECUTION_ENGINE,
     'code_execution.jupyter.url': CODE_EXECUTION_JUPYTER_URL,

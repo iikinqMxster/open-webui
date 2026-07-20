@@ -82,6 +82,41 @@ async def list_terminal_servers(request: Request, user=Depends(get_verified_user
 PROXY_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 
 
+@router.post('/{server_id}/sync')
+async def sync_terminal_files(
+    server_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Sync this chat's attached files (one-way) into the terminal's ~/input.
+
+    Declared BEFORE the catch-all proxy so ``sync`` is handled here rather than
+    forwarded upstream. The chat id is taken from the ``X-Session-Id`` header
+    (what the file panel already sends). Used to populate a freshly provisioned
+    per-chat container when the user opens the terminal/file panel.
+    """
+    from open_webui.utils.terminal_sync import (
+        resolve_terminal_connection,
+        sync_chat_files_to_terminal,
+        terminal_container_enabled,
+    )
+
+    chat_id = request.headers.get('x-session-id') or request.query_params.get('chat_id')
+    if not chat_id:
+        return JSONResponse({'error': 'Missing chat id (X-Session-Id)'}, status_code=400)
+
+    if not await terminal_container_enabled():
+        return {'synced': 0, 'skipped': 0, 'disabled': True}
+
+    connection = await resolve_terminal_connection(user, server_id)
+    if connection is None:
+        return JSONResponse(
+            {'error': 'Terminal server not found or access denied'}, status_code=404
+        )
+
+    return await sync_chat_files_to_terminal(request, user, chat_id, server_id)
+
+
 @router.api_route('/{server_id}/{path:path}', methods=PROXY_METHODS)
 async def proxy_terminal(
     server_id: str,
@@ -119,8 +154,10 @@ async def proxy_terminal(
         target_url += f'?{request.query_params}'
 
     headers = {'X-User-Id': user.id}
-    # Forward per-session cwd tracking header
-    session_id = request.headers.get('x-session-id')
+    # Forward the per-chat session id so the orchestrator routes to this chat's
+    # container. Browsers can't set headers on <img>/<a> loads, so also accept it
+    # via the `x_session_id` query param (used by inline ~/output previews).
+    session_id = request.headers.get('x-session-id') or request.query_params.get('x_session_id')
     if session_id:
         headers['X-Session-Id'] = session_id
     cookies = {}
@@ -285,6 +322,12 @@ async def ws_terminal(
     upstream_params = {}
     # For orchestrator-backed servers, pass user_id
     upstream_params['user_id'] = user.id
+    # Forward the chat id so the interactive shell attaches to this chat's
+    # per-chat container (same one the file browser/tools use). Headers can't be
+    # set on a browser WebSocket handshake, so the client passes it as a query param.
+    chat_session_id = ws.query_params.get('x_session_id')
+    if chat_session_id:
+        upstream_params['x_session_id'] = chat_session_id
 
     import urllib.parse
 

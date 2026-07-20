@@ -2709,6 +2709,26 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         form_data['messages'],
                         append=True,
                     )
+                if terminal_tools:
+                    # Teach the model the per-chat file conventions so generated
+                    # files render inline in chat (streamed via the proxy, never
+                    # copied into Open WebUI storage) and inputs are found.
+                    chat_id = metadata.get('chat_id') or ''
+                    file_sync_prompt = (
+                        'Terminal file conventions for this chat: files the user attached are '
+                        'available in ~/input. Write any files you generate to ~/output. To show '
+                        'a generated file (image, chart, PDF, etc.) inline in your reply, include a '
+                        'Markdown image or link whose URL is '
+                        f'/api/v1/terminals/{terminal_id}/files/view?path=~/output/<filename>'
+                        f'&x_session_id={chat_id} '
+                        '(for images use the ![name](URL) form). Files in ~/output are also '
+                        'browsable in the file panel.'
+                    )
+                    form_data['messages'] = add_or_update_system_message(
+                        file_sync_prompt,
+                        form_data['messages'],
+                        append=True,
+                    )
             except Exception as e:
                 log.exception(e)
 
@@ -2747,6 +2767,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     **extra_params,
                     '__event_emitter__': event_emitter,
                     '__skill_ids__': view_skill_ids,
+                    # `metadata` was rebuilt after extra_params was captured (it now
+                    # carries terminal_id); pass the current one so the terminal
+                    # container tool gate + its injected __metadata__ see it.
+                    '__metadata__': metadata,
                 },
                 features,
                 model,
