@@ -1082,6 +1082,60 @@ async def terminal_event_handler(
         )
 
 
+async def inject_terminal_tools(request, user, metadata, form_data, extra_params) -> list[str]:
+    """Add the chat's terminal tools (run_command, write_file, ...) to an
+    in-progress native function-calling loop.
+
+    Used when a terminal is created mid-response (via the ``create_terminal``
+    builtin): the terminal's OpenAPI tools may not have been available when the
+    turn started (e.g. the spec wasn't cached because no container existed yet),
+    so we resolve them now and merge them into both the dispatch table
+    (``metadata['tools']``) and the tool list sent to the model
+    (``form_data['tools']``). Idempotent — tools already present are left as-is.
+    Returns the names that were added.
+    """
+    terminal_id = metadata.get('terminal_id')
+    if not terminal_id:
+        return []
+    tools = metadata.get('tools') or {}
+
+    async def _resolve():
+        res = await get_terminal_tools(request, terminal_id, user, extra_params)
+        return (res[0] if isinstance(res, tuple) else res) or {}
+
+    try:
+        terminal_tools = await _resolve()
+        if not terminal_tools:
+            # Spec wasn't cached (no running container when the cache was built).
+            # Refresh now that the container exists, then retry.
+            try:
+                from open_webui.utils.tools import set_terminal_servers
+
+                await set_terminal_servers(request)
+            except Exception as e:
+                log.debug(f'terminal tools: spec refresh failed: {e}')
+            terminal_tools = await _resolve()
+
+        added = [name for name in terminal_tools if name not in tools]
+        for name in added:
+            tools[name] = terminal_tools[name]
+        # The container now exists — drop create_terminal for the rest of this
+        # turn so the model doesn't create it again.
+        removed = tools.pop('create_terminal', None) is not None
+        if not added and not removed:
+            return []
+        metadata['tools'] = tools
+        form_data['tools'] = [
+            {'type': 'function', 'function': t.get('spec', {})} for t in tools.values()
+        ]
+        if added:
+            log.info('terminal tools added mid-response: %s', added)
+        return added
+    except Exception as e:
+        log.debug(f'terminal tools: mid-response injection failed: {e}')
+        return []
+
+
 async def chat_completion_tools_handler(
     request: Request, body: dict, extra_params: dict, user: UserModel, models, tools
 ) -> tuple[dict, dict]:
@@ -4787,6 +4841,14 @@ async def streaming_chat_response_handler(response, ctx):
                             tool_result,
                             event_emitter,
                         )
+
+                        # If the model just created this chat's terminal, add the
+                        # terminal's own tools (run_command, write_file, ...) to
+                        # the running loop so it can use them in the same turn.
+                        if tool_function_name == 'create_terminal':
+                            await inject_terminal_tools(
+                                request, user, metadata, form_data, extra_params
+                            )
 
                         # Extract citation sources from tool results
                         if (
