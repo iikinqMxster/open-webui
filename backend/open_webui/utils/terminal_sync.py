@@ -107,16 +107,20 @@ def _proxy_base_url(connection: dict) -> str:
 
 
 def _build_headers(
-    connection: dict, user, chat_id: str | None, request=None
+    connection: dict, user, chat_id: str | None, request=None, no_create: bool = False
 ) -> tuple[dict, dict]:
     """Build auth headers + cookies for a terminal connection.
 
     Mirrors ``get_terminal_tools`` (utils/tools.py) — bearer / session /
     system_oauth. ``X-Session-Id`` (the chat id) scopes the container per chat.
+    When *no_create* is True, sets ``X-Terminal-No-Create`` so the orchestrator
+    won't provision a container for this (incidental) request.
     """
     headers: dict = {"X-User-Id": user.id}
     if chat_id:
         headers["X-Session-Id"] = chat_id
+    if no_create:
+        headers["X-Terminal-No-Create"] = "1"
 
     cookies: dict = {}
     auth_type = connection.get("auth_type", "bearer")
@@ -311,6 +315,7 @@ async def sync_chat_files_to_terminal(
     chat_id: str,
     terminal_id: str,
     file_ids: list[str] | None = None,
+    create: bool = True,
 ) -> dict:
     """Push chat input files into the chat's container ``~/input`` (one-way).
 
@@ -343,7 +348,9 @@ async def sync_chat_files_to_terminal(
         return {"synced": 0, "skipped": 0}
 
     files = await Files.get_files_by_ids(file_ids)
-    headers, cookies = _build_headers(connection, user, chat_id, request)
+    headers, cookies = _build_headers(
+        connection, user, chat_id, request, no_create=not create
+    )
     upload_url = f"{_proxy_base_url(connection)}/files/upload"
     log.info(
         "terminal sync: uploading %d file(s) to %s (%s) for chat %s",

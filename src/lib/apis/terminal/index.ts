@@ -108,6 +108,9 @@ export const listFiles = async (
 	if (sessionId) headers['X-Session-Id'] = sessionId;
 	const res = await fetch(url, { headers })
 		.then(async (res) => {
+			// 404 = no container for this chat yet (not created via create_terminal
+			// or a file attach). Treat as an empty listing, not an error.
+			if (res.status === 404) return { entries: [] };
 			if (!res.ok) throw await res.json();
 			return res.json();
 		})

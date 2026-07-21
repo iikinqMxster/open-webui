@@ -2740,9 +2740,19 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 tools_dict = {**tools_dict, **mcp_tools_dict}
 
         # Resolve terminal tools if terminal_id is set (outside tool_ids check
-        # so system terminals work even when no other tools are selected)
+        # so system terminals work even when no other tools are selected).
+        # Only offer them once the chat already has a container — otherwise a
+        # missing terminal must be created first (create_terminal / file attach),
+        # and offering run_command et al. would either 404 (no-create) or
+        # provision a container on connect, which we don't want.
         terminal_capability = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('terminal', True)
-        if terminal_id and terminal_capability:
+        from open_webui.utils.terminal_sync import chat_has_terminal
+
+        if (
+            terminal_id
+            and terminal_capability
+            and chat_has_terminal(request, metadata.get('chat_id'))
+        ):
             try:
                 terminal_result = await get_terminal_tools(
                     request,
