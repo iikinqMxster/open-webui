@@ -259,7 +259,16 @@
 		if (!terminal || !chatId) return;
 		if (lastSyncedChatId === chatId) return;
 		lastSyncedChatId = chatId;
-		syncTerminalFiles(terminal.url, terminal.key, chatId).catch(() => {});
+		const syncingChatId = chatId;
+		// Reload the current directory once the sync lands so freshly synced
+		// files show without the user having to switch chats.
+		syncTerminalFiles(terminal.url, terminal.key, chatId)
+			.then((res) => {
+				if (res && res.synced > 0 && selectedTerminal && chatId === syncingChatId) {
+					loadDir(currentPath);
+				}
+			})
+			.catch(() => {});
 	};
 
 	// The `mounted` flag prevents the initial run from racing with onMount.

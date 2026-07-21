@@ -565,7 +565,9 @@
 		} else if (type === 'terminal:write_file' || type === 'terminal:replace_file_content') {
 			if (!data?.path) return;
 			showFileNavDir.set(data.path);
-		} else if (type === 'terminal:run_command') {
+		} else if (type === 'terminal:run_command' || type === 'terminal:sync') {
+			// Reload the file panel's current directory (setting '/' triggers a
+			// reload of currentPath without navigating away).
 			showFileNavDir.set('/');
 		}
 	};

@@ -12,6 +12,7 @@ is also the "ensure the chat has a terminal" path.
 
 import asyncio
 import logging
+import time
 
 import aiohttp
 
@@ -27,6 +28,46 @@ log = logging.getLogger(__name__)
 # Directory conventions inside the terminal container home.
 INPUT_DIR = "~/input"
 OUTPUT_DIR = "~/output"
+
+# Track which chats have provisioned a container this process lifetime, so the
+# `create_terminal` tool can be dropped from the model's tool list once the
+# chat already has one. TTL'd so a container that has since been reaped lets the
+# tool reappear.
+_PROVISION_TTL_SECONDS = 900  # 15 minutes
+
+
+def _provisioned_map(request) -> dict:
+    state = request.app.state
+    m = getattr(state, "_terminal_provisioned_chats", None)
+    if m is None:
+        m = {}
+        state._terminal_provisioned_chats = m
+    return m
+
+
+def mark_chat_provisioned(request, chat_id: str | None) -> None:
+    """Record that *chat_id* has an active terminal container."""
+    if request is None or not chat_id:
+        return
+    try:
+        _provisioned_map(request)[chat_id] = time.monotonic()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+def chat_has_terminal(request, chat_id: str | None) -> bool:
+    """Whether *chat_id* is known to already have a (recent) container."""
+    if request is None or not chat_id:
+        return False
+    try:
+        ts = _provisioned_map(request).get(chat_id)
+    except Exception:  # pragma: no cover - defensive
+        return False
+    if ts is None:
+        return False
+    if time.monotonic() - ts > _PROVISION_TTL_SECONDS:
+        return False
+    return True
 
 
 def output_view_url(
@@ -119,6 +160,39 @@ async def resolve_terminal_connection(user, terminal_id: str) -> dict | None:
     return connection
 
 
+async def ensure_chat_terminal(request, user, chat_id: str, terminal_id: str) -> bool:
+    """Provision (or reuse) the chat's container without uploading anything.
+
+    A lightweight ``GET /files/cwd`` carrying ``X-Session-Id`` is enough to make
+    the orchestrator lazily create the per-chat container. Idempotent — the
+    orchestrator returns the existing container if one is already running.
+    Marks the chat provisioned on success. Never raises.
+    """
+    if not chat_id or not terminal_id:
+        return False
+    connection = await resolve_terminal_connection(user, terminal_id)
+    if connection is None:
+        return False
+    headers, cookies = _build_headers(connection, user, chat_id, request)
+    url = f"{_proxy_base_url(connection)}/files/cwd"
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30, connect=10),
+            trust_env=True,
+        ) as session:
+            async with session.get(
+                url, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_SSL
+            ) as resp:
+                ok = resp.status < 400
+    except Exception as e:
+        log.warning(f"terminal ensure: failed for chat {chat_id}: {e}")
+        return False
+    if ok:
+        mark_chat_provisioned(request, chat_id)
+        log.info("terminal ensure: container ready for chat %s (%s)", chat_id, terminal_id)
+    return ok
+
+
 async def _chat_input_file_ids(chat_id: str) -> list[str]:
     """All input (type=='file') attachments linked to a chat, de-duplicated."""
     try:
@@ -153,10 +227,25 @@ async def schedule_chat_file_sync(
     Returns True if a sync task was scheduled. Never blocks on the upload and
     never raises — file sync must not break chat completion.
     """
-    if not terminal_id or not chat_id:
+    if not chat_id:
+        log.info("terminal sync: skipped — no chat_id")
+        return False
+    if not terminal_id:
+        log.info(
+            "terminal sync: skipped for chat %s — no terminal_id on the request "
+            "(is a terminal selected and terminal capability enabled for the model?)",
+            chat_id,
+        )
         return False
     if not await terminal_container_enabled():
+        log.info("terminal sync: skipped — terminal_container.enable is off")
         return False
+
+    log.info(
+        "terminal sync: scheduling for chat=%s terminal=%s (%s)",
+        chat_id, terminal_id,
+        f"{len(file_ids)} file(s)" if file_ids is not None else "all chat files",
+    )
 
     async def _run() -> None:
         try:
@@ -164,7 +253,7 @@ async def schedule_chat_file_sync(
                 request, user, chat_id, terminal_id, file_ids=file_ids
             )
         except Exception as e:  # pragma: no cover - defensive
-            log.debug(f"terminal sync task failed: {e}")
+            log.warning(f"terminal sync task failed for chat {chat_id}: {e}")
 
     asyncio.create_task(_run())
     return True
@@ -192,6 +281,10 @@ async def sync_chat_files_to_terminal(
 
     connection = await resolve_terminal_connection(user, terminal_id)
     if connection is None:
+        log.info(
+            "terminal sync: terminal %s unavailable/denied for user %s (chat %s)",
+            terminal_id, getattr(user, "id", "?"), chat_id,
+        )
         return {"synced": 0, "skipped": 0, "error": "terminal_unavailable"}
 
     if file_ids is None:
@@ -200,11 +293,16 @@ async def sync_chat_files_to_terminal(
         # de-dup, preserve order, drop falsy ids
         file_ids = list(dict.fromkeys([fid for fid in file_ids if fid]))
     if not file_ids:
+        log.info("terminal sync: chat %s has no input files to sync", chat_id)
         return {"synced": 0, "skipped": 0}
 
     files = await Files.get_files_by_ids(file_ids)
     headers, cookies = _build_headers(connection, user, chat_id, request)
     upload_url = f"{_proxy_base_url(connection)}/files/upload"
+    log.info(
+        "terminal sync: uploading %d file(s) to %s (%s) for chat %s",
+        len(files), upload_url, INPUT_DIR, chat_id,
+    )
 
     synced = 0
     skipped = 0
@@ -251,6 +349,10 @@ async def sync_chat_files_to_terminal(
             except Exception as e:
                 skipped += 1
                 log.warning(f"terminal sync: upload error for {file.filename}: {e}")
+
+    if synced:
+        # A successful upload means the chat's container is provisioned.
+        mark_chat_provisioned(request, chat_id)
 
     log.info(
         f"terminal sync: chat={chat_id} terminal={terminal_id} "

@@ -623,13 +623,19 @@ async def get_builtin_tools(
     # terminal container and sync attached files into ~/input. Only offered when a
     # terminal is actually wired to this chat (an admin-configured, access-granted
     # connection surfaced as metadata['terminal_id']) and the model allows it.
+    # Once the chat already has a container it is dropped from the tool list so
+    # the model doesn't create it again mid-conversation.
+    _terminal_metadata = extra_params.get('__metadata__', {}) or {}
     if (
         is_builtin_tool_enabled('terminal')
         and config.get('terminal_container.enable')
         and get_model_capability('terminal')
-        and extra_params.get('__metadata__', {}).get('terminal_id')
+        and _terminal_metadata.get('terminal_id')
     ):
-        builtin_functions.append(create_terminal)
+        from open_webui.utils.terminal_sync import chat_has_terminal
+
+        if not chat_has_terminal(request, _terminal_metadata.get('chat_id')):
+            builtin_functions.append(create_terminal)
 
     # Notes tools - search, view, create, and update user's notes
     if is_builtin_tool_enabled('notes') and config.get('notes.enable') and await has_user_permission('notes'):

@@ -261,13 +261,19 @@
 		// handler would write a spurious "[Connection closed]" message.
 	};
 
-	// Reconnect when the selected terminal changes
-	$: if ($selectedTerminalId !== undefined && term) {
-		// Clear the terminal screen and reconnect to the new server
-		disconnect();
-		term.clear();
-		if ($selectedTerminalId) {
-			connect();
+	// Reconnect when the selected terminal OR the active chat changes, and
+	// disconnect entirely when there is no active chat (the terminal is scoped
+	// to a chat's per-chat container, so it shouldn't stay connected without one).
+	let _lastCtxKey: string | null = null;
+	$: if (term) {
+		const ctxKey = `${$selectedTerminalId ?? ''}|${chatId ?? ''}`;
+		if (ctxKey !== _lastCtxKey) {
+			_lastCtxKey = ctxKey;
+			disconnect();
+			term.clear();
+			if ($selectedTerminalId && chatId) {
+				connect();
+			}
 		}
 	}
 

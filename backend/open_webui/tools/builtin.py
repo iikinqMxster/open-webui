@@ -3835,6 +3835,7 @@ async def create_terminal(
         from open_webui.utils.terminal_sync import (
             INPUT_DIR,
             OUTPUT_DIR,
+            ensure_chat_terminal,
             resolve_terminal_connection,
             sync_chat_files_to_terminal,
         )
@@ -3855,7 +3856,9 @@ async def create_terminal(
         if connection is None:
             return json.dumps({'error': 'Terminal is unavailable or access is denied.'})
 
-        # Syncing a file provisions the per-chat container lazily (idempotent).
+        # Ensure the per-chat container exists (idempotent, provisions even when
+        # there are no files to sync), then push any attached files into ~/input.
+        await ensure_chat_terminal(__request__, user, chat_id, terminal_id)
         result = await sync_chat_files_to_terminal(__request__, user, chat_id, terminal_id)
 
         # Nudge the file panel to refresh so ~/input / ~/output are shown.
