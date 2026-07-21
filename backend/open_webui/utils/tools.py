@@ -1252,7 +1252,13 @@ async def get_terminal_tools(
     if session_id:
         headers['X-Session-Id'] = session_id
 
-    terminal_cwd = await get_terminal_cwd(connection.get('url', ''), headers, cookies)
+    # Use the same base URL the tool calls use (server_data['url'] already
+    # includes the orchestrator's /p/{policy_id} prefix) so the cwd probe hits
+    # the SAME per-chat container as run_command/etc. — not a different key via
+    # the policy-less catch-all route.
+    terminal_cwd = await get_terminal_cwd(
+        server_data.get('url') or connection.get('url', ''), headers, cookies
+    )
 
     tools_dict = {}
     for spec in specs:

@@ -11,6 +11,7 @@ is also the "ensure the chat has a terminal" path.
 """
 
 import asyncio
+import json
 import logging
 import time
 
@@ -160,37 +161,72 @@ async def resolve_terminal_connection(user, terminal_id: str) -> dict | None:
     return connection
 
 
-async def ensure_chat_terminal(request, user, chat_id: str, terminal_id: str) -> bool:
-    """Provision (or reuse) the chat's container without uploading anything.
+async def ensure_chat_terminal(request, user, chat_id: str, terminal_id: str) -> dict:
+    """Provision (or reuse) the chat's container and VERIFY it is actually up.
 
-    A lightweight ``GET /files/cwd`` carrying ``X-Session-Id`` is enough to make
-    the orchestrator lazily create the per-chat container. Idempotent — the
-    orchestrator returns the existing container if one is already running.
-    Marks the chat provisioned on success. Never raises.
+    Hits ``GET /files/cwd`` (carrying ``X-Session-Id``) which makes the
+    orchestrator lazily create the per-chat container; the container is only
+    considered ready when it returns HTTP 200 with a valid terminal payload
+    (a ``cwd``/``home``). Retries a few times because a freshly provisioned
+    container may take a moment to serve. Marks the chat provisioned on success.
+    Never raises.
+
+    Returns ``{"ready": bool, "detail": str, "cwd": str | None}`` so callers can
+    surface a real reason instead of falsely reporting success.
     """
     if not chat_id or not terminal_id:
-        return False
+        return {"ready": False, "detail": "missing chat id or terminal id"}
     connection = await resolve_terminal_connection(user, terminal_id)
     if connection is None:
-        return False
+        return {
+            "ready": False,
+            "detail": "terminal connection not found, disabled, or access denied",
+        }
     headers, cookies = _build_headers(connection, user, chat_id, request)
     url = f"{_proxy_base_url(connection)}/files/cwd"
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30, connect=10),
-            trust_env=True,
-        ) as session:
-            async with session.get(
-                url, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_SSL
-            ) as resp:
-                ok = resp.status < 400
-    except Exception as e:
-        log.warning(f"terminal ensure: failed for chat {chat_id}: {e}")
-        return False
-    if ok:
-        mark_chat_provisioned(request, chat_id)
-        log.info("terminal ensure: container ready for chat %s (%s)", chat_id, terminal_id)
-    return ok
+
+    last_detail = "no response from terminal orchestrator"
+    attempts = 4
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30, connect=10),
+        trust_env=True,
+    ) as session:
+        for attempt in range(attempts):
+            try:
+                async with session.get(
+                    url, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_SSL
+                ) as resp:
+                    body = await resp.text()
+                    if resp.status == 200:
+                        try:
+                            data = json.loads(body)
+                        except Exception:
+                            data = None
+                        # A real Open Terminal /files/cwd returns cwd/home/root.
+                        if isinstance(data, dict) and ("cwd" in data or "home" in data):
+                            mark_chat_provisioned(request, chat_id)
+                            log.info(
+                                "terminal ensure: container ready for chat %s (%s) cwd=%s",
+                                chat_id, terminal_id, data.get("cwd"),
+                            )
+                            return {
+                                "ready": True,
+                                "detail": "ready",
+                                "cwd": data.get("cwd"),
+                            }
+                        last_detail = f"HTTP 200 but unexpected body: {body[:200]}"
+                    else:
+                        last_detail = f"HTTP {resp.status}: {body[:200]}"
+            except Exception as e:
+                last_detail = f"request error: {e}"
+            if attempt < attempts - 1:
+                await asyncio.sleep(1.5)
+
+    log.warning(
+        "terminal ensure: container NOT ready for chat %s (%s): %s",
+        chat_id, terminal_id, last_detail,
+    )
+    return {"ready": False, "detail": last_detail}
 
 
 async def _chat_input_file_ids(chat_id: str) -> list[str]:
@@ -221,11 +257,14 @@ async def schedule_chat_file_sync(
     chat_id: str | None,
     terminal_id: str | None,
     file_ids: list[str] | None = None,
+    event_emitter=None,
 ) -> bool:
     """Fire-and-forget one-way sync (used from the chat-completion hot path).
 
     Returns True if a sync task was scheduled. Never blocks on the upload and
-    never raises — file sync must not break chat completion.
+    never raises — file sync must not break chat completion. When *event_emitter*
+    is given, emits a ``terminal:sync`` event after a successful sync so the file
+    panel refreshes.
     """
     if not chat_id:
         log.info("terminal sync: skipped — no chat_id")
@@ -249,9 +288,16 @@ async def schedule_chat_file_sync(
 
     async def _run() -> None:
         try:
-            await sync_chat_files_to_terminal(
+            result = await sync_chat_files_to_terminal(
                 request, user, chat_id, terminal_id, file_ids=file_ids
             )
+            if event_emitter and (result or {}).get("synced"):
+                try:
+                    await event_emitter(
+                        {"type": "terminal:sync", "data": {"chat_id": chat_id}}
+                    )
+                except Exception:
+                    pass
         except Exception as e:  # pragma: no cover - defensive
             log.warning(f"terminal sync task failed for chat {chat_id}: {e}")
 

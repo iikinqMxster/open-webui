@@ -1316,8 +1316,18 @@ async def chat_completion(
                         try:
                             from open_webui.utils.terminal_sync import schedule_chat_file_sync
 
+                            _terminal_id = form_data.get('terminal_id')
                             await schedule_chat_file_sync(
-                                request, user, chat_id, form_data.get('terminal_id'), input_file_ids
+                                request,
+                                user,
+                                chat_id,
+                                _terminal_id,
+                                input_file_ids,
+                                event_emitter=(
+                                    await get_event_emitter(metadata, update_db=False)
+                                    if _terminal_id
+                                    else None
+                                ),
                             )
                         except Exception as e:
                             log.debug(f'Error scheduling terminal file sync: {e}')
@@ -1425,8 +1435,18 @@ async def chat_completion(
                         try:
                             from open_webui.utils.terminal_sync import schedule_chat_file_sync
 
+                            _terminal_id = form_data.get('terminal_id')
                             await schedule_chat_file_sync(
-                                request, user, chat_id, form_data.get('terminal_id'), input_file_ids
+                                request,
+                                user,
+                                chat_id,
+                                _terminal_id,
+                                input_file_ids,
+                                event_emitter=(
+                                    await get_event_emitter(metadata, update_db=False)
+                                    if _terminal_id
+                                    else None
+                                ),
                             )
                         except Exception as e:
                             log.debug(f'Error scheduling terminal file sync: {e}')

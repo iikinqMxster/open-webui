@@ -4842,13 +4842,26 @@ async def streaming_chat_response_handler(response, ctx):
                             event_emitter,
                         )
 
-                        # If the model just created this chat's terminal, add the
-                        # terminal's own tools (run_command, write_file, ...) to
-                        # the running loop so it can use them in the same turn.
+                        # If the model just SUCCESSFULLY created this chat's
+                        # terminal, add the terminal's own tools (run_command,
+                        # write_file, ...) to the running loop so it can use them
+                        # in the same turn. Only on success — a failed attempt
+                        # must keep create_terminal available for a retry.
                         if tool_function_name == 'create_terminal':
-                            await inject_terminal_tools(
-                                request, user, metadata, form_data, extra_params
-                            )
+                            _ct_ready = False
+                            try:
+                                _ct_res = (
+                                    json.loads(tool_result)
+                                    if isinstance(tool_result, str)
+                                    else (tool_result if isinstance(tool_result, dict) else {})
+                                )
+                                _ct_ready = _ct_res.get('status') == 'ready'
+                            except Exception:
+                                _ct_ready = False
+                            if _ct_ready:
+                                await inject_terminal_tools(
+                                    request, user, metadata, form_data, extra_params
+                                )
 
                         # Extract citation sources from tool results
                         if (
