@@ -1251,10 +1251,6 @@ async def get_terminal_tools(
     session_id = metadata.get('chat_id')
     if session_id:
         headers['X-Session-Id'] = session_id
-    # Neither the cwd probe below nor terminal tool calls (run_command, etc.)
-    # should provision a container — only create_terminal / file-attach do. The
-    # terminal tools are only offered once the chat already has a container.
-    headers['X-Terminal-No-Create'] = '1'
 
     # Use the same base URL the tool calls use (server_data['url'] already
     # includes the orchestrator's /p/{policy_id} prefix) so the cwd probe hits

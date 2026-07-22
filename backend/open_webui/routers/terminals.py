@@ -114,11 +114,7 @@ async def sync_terminal_files(
             {'error': 'Terminal server not found or access denied'}, status_code=404
         )
 
-    # Opening the file panel must not create a container — only refresh ~/input
-    # if one already exists (created via create_terminal or a file attach).
-    return await sync_chat_files_to_terminal(
-        request, user, chat_id, server_id, create=False
-    )
+    return await sync_chat_files_to_terminal(request, user, chat_id, server_id)
 
 
 @router.api_route('/{server_id}/{path:path}', methods=PROXY_METHODS)
@@ -164,9 +160,6 @@ async def proxy_terminal(
     session_id = request.headers.get('x-session-id') or request.query_params.get('x_session_id')
     if session_id:
         headers['X-Session-Id'] = session_id
-    # File browsing / inline previews are incidental — they must NOT provision a
-    # container. Only create_terminal and file-attach sync create one.
-    headers['X-Terminal-No-Create'] = '1'
     cookies = {}
     auth_type = connection.get('auth_type', 'bearer')
 
@@ -335,9 +328,6 @@ async def ws_terminal(
     chat_session_id = ws.query_params.get('x_session_id')
     if chat_session_id:
         upstream_params['x_session_id'] = chat_session_id
-    # The interactive shell must not provision a container — it only attaches to
-    # one that already exists (created via create_terminal or a file attach).
-    upstream_params['x_terminal_no_create'] = '1'
 
     import urllib.parse
 
