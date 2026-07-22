@@ -373,7 +373,7 @@
 									}}
 									onClose={() => showControls.set(false)}
 								/>
-							{:else if activeTab === 'files' && $selectedTerminalId}
+							{:else if activeTab === 'files' && $selectedTerminalId && chatId}
 								<FileNav onAttach={handleTerminalAttach} {chatId} />
 							{:else if activeTab === 'files' && codeInterpreterEnabled}
 								<PyodideFileNav />
@@ -524,7 +524,7 @@
 										}}
 										onClose={() => showControls.set(false)}
 									/>
-								{:else if activeTab === 'files' && $selectedTerminalId}
+								{:else if activeTab === 'files' && $selectedTerminalId && chatId}
 									<FileNav onAttach={handleTerminalAttach} overlay={dragged} {chatId} />
 								{:else if activeTab === 'files' && codeInterpreterEnabled}
 									<PyodideFileNav overlay={dragged} />

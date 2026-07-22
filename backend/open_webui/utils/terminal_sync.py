@@ -11,7 +11,6 @@ is also the "ensure the chat has a terminal" path.
 """
 
 import asyncio
-import json
 import logging
 import time
 
@@ -159,74 +158,6 @@ async def resolve_terminal_connection(user, terminal_id: str) -> dict | None:
     if not await has_connection_access(user, connection, user_group_ids):
         return None
     return connection
-
-
-async def ensure_chat_terminal(request, user, chat_id: str, terminal_id: str) -> dict:
-    """Provision (or reuse) the chat's container and VERIFY it is actually up.
-
-    Hits ``GET /files/cwd`` (carrying ``X-Session-Id``) which makes the
-    orchestrator lazily create the per-chat container; the container is only
-    considered ready when it returns HTTP 200 with a valid terminal payload
-    (a ``cwd``/``home``). Retries a few times because a freshly provisioned
-    container may take a moment to serve. Marks the chat provisioned on success.
-    Never raises.
-
-    Returns ``{"ready": bool, "detail": str, "cwd": str | None}`` so callers can
-    surface a real reason instead of falsely reporting success.
-    """
-    if not chat_id or not terminal_id:
-        return {"ready": False, "detail": "missing chat id or terminal id"}
-    connection = await resolve_terminal_connection(user, terminal_id)
-    if connection is None:
-        return {
-            "ready": False,
-            "detail": "terminal connection not found, disabled, or access denied",
-        }
-    headers, cookies = _build_headers(connection, user, chat_id, request)
-    url = f"{_proxy_base_url(connection)}/files/cwd"
-
-    last_detail = "no response from terminal orchestrator"
-    attempts = 4
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=30, connect=10),
-        trust_env=True,
-    ) as session:
-        for attempt in range(attempts):
-            try:
-                async with session.get(
-                    url, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_SSL
-                ) as resp:
-                    body = await resp.text()
-                    if resp.status == 200:
-                        try:
-                            data = json.loads(body)
-                        except Exception:
-                            data = None
-                        # A real Open Terminal /files/cwd returns cwd/home/root.
-                        if isinstance(data, dict) and ("cwd" in data or "home" in data):
-                            mark_chat_provisioned(request, chat_id)
-                            log.info(
-                                "terminal ensure: container ready for chat %s (%s) cwd=%s",
-                                chat_id, terminal_id, data.get("cwd"),
-                            )
-                            return {
-                                "ready": True,
-                                "detail": "ready",
-                                "cwd": data.get("cwd"),
-                            }
-                        last_detail = f"HTTP 200 but unexpected body: {body[:200]}"
-                    else:
-                        last_detail = f"HTTP {resp.status}: {body[:200]}"
-            except Exception as e:
-                last_detail = f"request error: {e}"
-            if attempt < attempts - 1:
-                await asyncio.sleep(1.5)
-
-    log.warning(
-        "terminal ensure: container NOT ready for chat %s (%s): %s",
-        chat_id, terminal_id, last_detail,
-    )
-    return {"ready": False, "detail": last_detail}
 
 
 async def _chat_input_file_ids(chat_id: str) -> list[str]:

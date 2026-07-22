@@ -3835,7 +3835,7 @@ async def create_terminal(
         from open_webui.utils.terminal_sync import (
             INPUT_DIR,
             OUTPUT_DIR,
-            ensure_chat_terminal,
+            mark_chat_provisioned,
             resolve_terminal_connection,
             sync_chat_files_to_terminal,
         )
@@ -3856,24 +3856,11 @@ async def create_terminal(
         if connection is None:
             return json.dumps({'error': 'Terminal is unavailable or access is denied.'})
 
-        # Ensure the per-chat container exists AND is actually up (idempotent,
-        # provisions even when there are no files to sync). Only report success
-        # once verified — never claim it was created if provisioning failed.
-        ensure = await ensure_chat_terminal(__request__, user, chat_id, terminal_id)
-        if not ensure.get('ready'):
-            return json.dumps(
-                {
-                    'status': 'error',
-                    'error': (
-                        'The terminal container could not be created/reached: '
-                        f"{ensure.get('detail')}. It was NOT created — do not "
-                        'assume a terminal is available.'
-                    ),
-                }
-            )
-
-        # Container is verified up — push any attached files into ~/input.
+        # A terminal always exists for a chat (the orchestrator provisions one on
+        # demand), so there's nothing to "ensure" — just sync the chat's attached
+        # files into ~/input (the upload targets this chat's container).
         result = await sync_chat_files_to_terminal(__request__, user, chat_id, terminal_id)
+        mark_chat_provisioned(__request__, chat_id)
 
         # Nudge the file panel to refresh so ~/input / ~/output are shown.
         if __event_emitter__:

@@ -353,9 +353,13 @@
 	};
 
 	const applyCwd = (cwd: TerminalCwd | null) => {
-		setFileRoot(cwd?.root);
-		const path = cwd?.cwd ? asDirectoryPath(cwd.cwd) : (fileRoot?.path ?? '/');
-		return clampToFileRoot(path);
+		// Restrict the file browser to the container's ~/output directory — that's
+		// where generated files land and the only thing we surface in chat. ~/input
+		// (synced-in files) is intentionally not browsable here.
+		const home = cwd?.home ? asDirectoryPath(cwd.home) : null;
+		const outputPath = home ? `${home}output/` : '~/output/';
+		setFileRoot({ path: outputPath, label: 'output' });
+		return clampToFileRoot(outputPath);
 	};
 
 	const buildBreadcrumbs = (path: string) => {

@@ -500,11 +500,7 @@
 					}
 				}
 
-				// Terminal follows the active chat's model. Clear it first so it
-				// doesn't persist when clicking off a chat / switching to a chat
-				// whose model doesn't use a terminal; then set the model's default
-				// terminal if it references one that actually exists.
-				selectedTerminalId.set(null);
+				// Set Default Terminal — only if the referenced terminal actually exists
 				if (model?.info?.meta?.terminalId) {
 					const tid = model.info.meta.terminalId;
 					if (isTerminalAvailable(tid)) {
