@@ -15,6 +15,8 @@
 				goto('/workspace/tools');
 			} else if ($user?.permissions?.workspace?.skills) {
 				goto('/workspace/skills');
+			} else if ($user?.permissions?.workspace?.subagents) {
+				goto('/workspace/subagents');
 			} else {
 				goto('/');
 			}

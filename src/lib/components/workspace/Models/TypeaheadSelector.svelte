@@ -7,6 +7,7 @@
 	type Item = {
 		id: string;
 		name?: string;
+		handle?: string;
 		description?: string;
 		meta?: {
 			description?: string;
@@ -34,10 +35,15 @@
 	$: matchedItems = (items ?? []).filter((item) => {
 		const id = item.id.toLowerCase();
 		const name = (item.name ?? '').toLowerCase();
+		const handle = (item.handle ?? '').toLowerCase();
 		const description = (item.description ?? item.meta?.description ?? '').toLowerCase();
 
 		return (
-			query === '' || id.includes(query) || name.includes(query) || description.includes(query)
+			query === '' ||
+			id.includes(query) ||
+			name.includes(query) ||
+			handle.includes(query) ||
+			description.includes(query)
 		);
 	});
 
@@ -119,7 +125,12 @@
 									selectItem(item);
 								}}
 							>
-								<span class="min-w-0 flex-1 truncate">{item.name || item.id}</span>
+								<span class="flex min-w-0 flex-1 items-center gap-1.5 truncate">
+									<span class="truncate">{item.name || item.handle || item.id}</span>
+									{#if item.handle && item.name}
+										<span class="shrink-0 text-gray-400 dark:text-gray-500">{item.handle}</span>
+									{/if}
+								</span>
 								{#if selectedIds !== null && selectedIds.includes(item.id)}
 									<svg
 										class="size-3.5 shrink-0 text-gray-500 dark:text-gray-400"

@@ -69,9 +69,16 @@ export const models: Writable<Model[]> = writable([]);
 export const knowledge: Writable<null | Document[]> = writable(null);
 export const tools = writable(null);
 export const skills = writable(null);
+export const subagents = writable(null);
 export const functions = writable(null);
 
-export type WorkspaceSection = 'models' | 'knowledge' | 'prompts' | 'skills' | 'tools';
+export type WorkspaceSection =
+	| 'models'
+	| 'knowledge'
+	| 'prompts'
+	| 'skills'
+	| 'subagents'
+	| 'tools';
 export type WorkspaceAction = {
 	id: string;
 	label: string;
@@ -85,6 +92,7 @@ export const workspaceCounts: Writable<Record<WorkspaceSection, number | null>> 
 	knowledge: null,
 	prompts: null,
 	skills: null,
+	subagents: null,
 	tools: null
 });
 export const workspaceActions: Writable<WorkspaceAction[]> = writable([]);

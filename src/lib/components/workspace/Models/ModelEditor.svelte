@@ -7,6 +7,7 @@
 
 	import { getTools } from '$lib/apis/tools';
 	import { getSkills } from '$lib/apis/skills';
+	import { getSubagents } from '$lib/apis/subagents';
 	import { getFunctions } from '$lib/apis/functions';
 	import { getModelsDefaults } from '$lib/apis/configs';
 	import { getBaseModelTags, getModelTags } from '$lib/apis/models';
@@ -18,6 +19,7 @@
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import ToolsSelector from '$lib/components/workspace/Models/ToolsSelector.svelte';
 	import SkillsSelector from '$lib/components/workspace/Models/SkillsSelector.svelte';
+	import SubagentsSelector from '$lib/components/workspace/Models/SubagentsSelector.svelte';
 	import FiltersSelector from '$lib/components/workspace/Models/FiltersSelector.svelte';
 	import ActionsSelector from '$lib/components/workspace/Models/ActionsSelector.svelte';
 	import Capabilities from '$lib/components/workspace/Models/Capabilities.svelte';
@@ -99,6 +101,8 @@
 	let toolIds = [];
 	let skillIds = [];
 	let skillsList = [];
+	let subagentIds = [];
+	let subagentsList = [];
 
 	let filterIds = [];
 	let defaultFilterIds = [];
@@ -293,6 +297,14 @@
 			}
 		}
 
+		if (subagentIds.length > 0) {
+			info.meta.subagentIds = subagentIds;
+		} else {
+			if (info.meta.subagentIds) {
+				delete info.meta.subagentIds;
+			}
+		}
+
 		if (filterIds.length > 0) {
 			info.meta.filterIds = filterIds;
 		} else {
@@ -374,6 +386,7 @@
 	onMount(async () => {
 		await tools.set((await getTools(localStorage.token).catch(() => null)) ?? []);
 		skillsList = (await getSkills(localStorage.token).catch(() => null)) ?? [];
+		subagentsList = (await getSubagents(localStorage.token).catch(() => null)) ?? [];
 		if (!$functions) {
 			await functions.set(await getFunctions(localStorage.token));
 		}
@@ -454,6 +467,7 @@
 
 			toolIds = model?.meta?.toolIds ?? [];
 			skillIds = model?.meta?.skillIds ?? [];
+			subagentIds = model?.meta?.subagentIds ?? [];
 			filterIds = model?.meta?.filterIds ?? [];
 			defaultFilterIds = model?.meta?.defaultFilterIds ?? [];
 			actionIds = model?.meta?.actionIds ?? [];
@@ -903,6 +917,10 @@
 
 						<div class="my-3">
 							<SkillsSelector bind:selectedSkillIds={skillIds} skills={skillsList} />
+						</div>
+
+						<div class="my-3">
+							<SubagentsSelector bind:selectedSubagentIds={subagentIds} subagents={subagentsList} />
 						</div>
 
 						{#if ($functions ?? []).filter((func) => func.type === 'filter').length > 0 || ($functions ?? []).filter((func) => func.type === 'action').length > 0}

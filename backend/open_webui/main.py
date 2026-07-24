@@ -163,6 +163,7 @@ from open_webui.routers import (
     retrieval,
     scim,
     skills,
+    subagents,
     tasks,
     terminals,
     tools,
@@ -798,6 +799,7 @@ app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledg
 app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
 app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
 app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
+app.include_router(subagents.router, prefix='/api/v1/subagents', tags=['subagents'])
 
 app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
@@ -1054,8 +1056,19 @@ async def chat_completion(
             model = request.app.state.MODELS[model_id]
             model_info = await Models.get_model_by_id(model_id)
 
-            # Check if user has access to the model
-            if not BYPASS_MODEL_ACCESS_CONTROL and (user.role != 'admin' or not BYPASS_ADMIN_ACCESS_CONTROL):
+            # Internal sub-agent requests may carry a resolved model overlay whose meta/params
+            # drive this completion (knowledge, builtin tools, capabilities, default features).
+            # See open_webui.utils.subagents.delegate/run_reserved. Trusted internal path only.
+            if getattr(request.state, 'internal', False) and model_item:
+                model = model_item
+
+            # Check if user has access to the model (skipped for internal sub-agent requests,
+            # which the parent delegation already authorized for this same user).
+            if (
+                not BYPASS_MODEL_ACCESS_CONTROL
+                and not getattr(request.state, 'internal', False)
+                and (user.role != 'admin' or not BYPASS_ADMIN_ACCESS_CONTROL)
+            ):
                 try:
                     await check_model_access(user, model)
                 except Exception as e:

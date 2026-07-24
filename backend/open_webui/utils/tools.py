@@ -44,6 +44,7 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.models.chats import Chats
 from open_webui.models.config import Config
 from open_webui.models.groups import Groups
+from open_webui.models.subagents import Subagents
 from open_webui.models.tools import Tools
 from open_webui.models.users import UserModel
 from open_webui.tools.builtin import (
@@ -717,11 +718,35 @@ async def get_builtin_tools(
         pydantic_model = convert_function_to_pydantic_model(func)
         spec = convert_pydantic_model_to_openai_function_spec(pydantic_model)
         spec = clean_openai_tool_schema(spec)
-        if func.__name__ == 'delegate_task' and not config.get('subagents.background_enabled'):
+        if func.__name__ == 'delegate_task':
             parameters = spec.get('parameters', {})
-            parameters.get('properties', {}).pop('background', None)
-            if isinstance(parameters.get('required'), list):
-                parameters['required'] = [name for name in parameters['required'] if name != 'background']
+            properties = parameters.get('properties', {})
+            if not config.get('subagents.background_enabled'):
+                properties.pop('background', None)
+                if isinstance(parameters.get('required'), list):
+                    parameters['required'] = [name for name in parameters['required'] if name != 'background']
+
+            # Surface the sub-agents attached to this model (Workspace > Models) so the lead
+            # agent can pick one by id. When none are attached, drop the param entirely and
+            # delegate_task falls back to the default task model + default sub-agent prompt.
+            attached_ids = (model.get('info', {}).get('meta', {}) or {}).get('subagentIds', []) or []
+            attached_subagents = await Subagents.get_subagents_by_ids(attached_ids) if attached_ids else []
+            if attached_subagents:
+                catalog = '\n'.join(
+                    f'- {sa.handle or sa.id}: {sa.description or sa.name}' for sa in attached_subagents
+                )
+                properties['subagent_id'] = {
+                    'type': 'string',
+                    'enum': [sa.handle or sa.id for sa in attached_subagents],
+                    'description': (
+                        'Optional id of a pre-configured sub-agent to run instead of the default '
+                        'task model. Leave empty for the default. Available sub-agents:\n' + catalog
+                    ),
+                }
+            else:
+                properties.pop('subagent_id', None)
+                if isinstance(parameters.get('required'), list):
+                    parameters['required'] = [name for name in parameters['required'] if name != 'subagent_id']
 
         tools_dict[func.__name__] = {
             'tool_id': f'builtin:{func.__name__}',
