@@ -732,9 +732,16 @@ async def get_builtin_tools(
             attached_ids = (model.get('info', {}).get('meta', {}) or {}).get('subagentIds', []) or []
             attached_subagents = await Subagents.get_subagents_by_ids(attached_ids) if attached_ids else []
             if attached_subagents:
-                catalog = '\n'.join(
-                    f'- {sa.handle or sa.id}: {sa.description or sa.name}' for sa in attached_subagents
-                )
+
+                def _catalog_entry(sa) -> str:
+                    # Mark remote (Agent-to-Agent) sub-agents so the lead agent knows the work
+                    # leaves this server and runs on an external service.
+                    meta = sa.meta.model_dump() if sa.meta else {}
+                    remote = (meta or {}).get('remote') or {}
+                    suffix = ' (remote agent)' if isinstance(remote, dict) and remote.get('enabled') else ''
+                    return f'- {sa.handle or sa.id}{suffix}: {sa.description or sa.name}'
+
+                catalog = '\n'.join(_catalog_entry(sa) for sa in attached_subagents)
                 properties['subagent_id'] = {
                     'type': 'string',
                     'enum': [sa.handle or sa.id for sa in attached_subagents],

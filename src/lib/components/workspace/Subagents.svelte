@@ -273,6 +273,9 @@
 															{subagent.handle}
 														</div>
 													{/if}
+													{#if subagent?.meta?.remote?.enabled}
+														<Badge type="muted" content={$i18n.t('Remote')} />
+													{/if}
 													{#if !subagent.is_active}
 														<Badge type="muted" content={$i18n.t('Inactive')} />
 													{/if}
@@ -310,6 +313,9 @@
 															<div class="text-xs text-gray-500 shrink-0 truncate">
 																{subagent.handle}
 															</div>
+														{/if}
+														{#if subagent?.meta?.remote?.enabled}
+															<Badge type="muted" content={$i18n.t('Remote')} />
 														{/if}
 														{#if !subagent.is_active}
 															<Badge type="muted" content={$i18n.t('Inactive')} />

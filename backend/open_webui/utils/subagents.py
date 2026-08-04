@@ -17,6 +17,11 @@ from open_webui.models.users import UserModel, Users
 from open_webui.tasks import create_task, has_active_tasks
 from open_webui.utils.auth import create_token
 from open_webui.utils.misc import get_message_list
+from open_webui.utils.remote_agents import (
+    enforce_ssrf,
+    invoke_remote_agent,
+    resolve_remote_config,
+)
 from sqlalchemy import select
 from starlette.datastructures import Headers
 
@@ -368,36 +373,53 @@ async def delegate(
     if subagent:
         sa_meta = subagent.meta.model_dump() if subagent.meta else {}
         sa_params = subagent.params.model_dump() if subagent.params else {}
-        if subagent.base_model_id and subagent.base_model_id in models:
-            # Honour the sub-agent's configured model only if the delegating user can
-            # actually access it; otherwise fall back to the task-model default so a
-            # pre-configured sub-agent can't be used to reach a restricted model.
-            from open_webui.models.models import Models
-            from open_webui.utils.access_control import check_model_access
 
-            try:
-                await check_model_access(user, await Models.get_model_by_id(subagent.base_model_id))
-                run['model_id'] = subagent.base_model_id
-            except Exception:
-                pass
-        if sa_meta.get('toolIds'):
-            run['tool_ids'] = copy.deepcopy(sa_meta.get('toolIds'))
-        if sa_meta.get('skillIds'):
-            run['skill_ids'] = copy.deepcopy(sa_meta.get('skillIds'))
-        if sa_meta.get('filterIds'):
-            run['filter_ids'] = copy.deepcopy(sa_meta.get('filterIds'))
-        if sa_params.get('system'):
-            run['subagent_system_prompt'] = sa_params.get('system')
-        # Terminal is not independently configurable: the sub-agent only gets terminal
-        # tools when "Filesystem Access" is enabled, and it reuses the parent's terminal.
-        if not sa_meta.get('filesystemAccess'):
+        # A remote (Agent-to-Agent) sub-agent runs on an external service: it brings its own
+        # model, tools and runtime, so none of the local overrides below apply.
+        remote_config = resolve_remote_config(subagent)
+        if remote_config:
+            run['remote'] = remote_config
+            run['remote_owner_id'] = subagent.user_id
+            run['remote_handle'] = subagent.handle or subagent.id
+            if sa_params.get('system'):
+                run['subagent_system_prompt'] = sa_params.get('system')
             run['terminal_id'] = None
-        # Carry the full config so the child completion runs as this sub-agent's "model"
-        # (knowledge, builtin tools, capabilities, default features).
-        run['overlay_meta'] = sa_meta
-        run['overlay_params'] = sa_params
+        else:
+            if subagent.base_model_id and subagent.base_model_id in models:
+                # Honour the sub-agent's configured model only if the delegating user can
+                # actually access it; otherwise fall back to the task-model default so a
+                # pre-configured sub-agent can't be used to reach a restricted model.
+                from open_webui.models.models import Models
+                from open_webui.utils.access_control import check_model_access
 
-    if not run.get('model_id'):
+                try:
+                    await check_model_access(
+                        user, await Models.get_model_by_id(subagent.base_model_id)
+                    )
+                    run['model_id'] = subagent.base_model_id
+                except Exception:
+                    pass
+            if sa_meta.get('toolIds'):
+                run['tool_ids'] = copy.deepcopy(sa_meta.get('toolIds'))
+            if sa_meta.get('skillIds'):
+                run['skill_ids'] = copy.deepcopy(sa_meta.get('skillIds'))
+            if sa_meta.get('filterIds'):
+                run['filter_ids'] = copy.deepcopy(sa_meta.get('filterIds'))
+            if sa_params.get('system'):
+                run['subagent_system_prompt'] = sa_params.get('system')
+            # Terminal is not independently configurable: the sub-agent only gets terminal
+            # tools when "Filesystem Access" is enabled, and it reuses the parent's terminal.
+            if not sa_meta.get('filesystemAccess'):
+                run['terminal_id'] = None
+            # Carry the full config so the child completion runs as this sub-agent's "model"
+            # (knowledge, builtin tools, capabilities, default features).
+            run['overlay_meta'] = sa_meta
+            run['overlay_params'] = sa_params
+
+    if run.get('remote'):
+        # A remote agent needs no local model; keep a readable label for the chat record.
+        run['model_id'] = run.get('model_id') or f'remote:{run["remote_handle"]}'
+    elif not run.get('model_id'):
         return 'Error: model context is required.'
     if run.get('direct'):
         return 'Error: sub-agents are unavailable for direct connections.'
@@ -479,8 +501,91 @@ async def delegate(
         prefix = 'background ' if background else ''
         return f'Error: failed to create {prefix}sub-agent: {exc}'
 
+    async def run_remote() -> dict:
+        """Invoke a remote (A2A) sub-agent and return the standard result dict."""
+        remote = run['remote']
+
+        # SSRF protection is keyed on the sub-agent OWNER's role, not the caller's, so a
+        # shared sub-agent behaves identically for everyone who can delegate to it.
+        owner_role = None
+        try:
+            owner = await Users.get_user_by_id(run.get('remote_owner_id'))
+            owner_role = owner.role if owner else None
+        except Exception:
+            owner_role = None
+
+        key = ''
+        if remote.get('key_encrypted'):
+            try:
+                from open_webui.utils.oauth import decrypt_data
+
+                key = decrypt_data(remote['key_encrypted']) or ''
+            except Exception:
+                return {
+                    'status': 'error',
+                    'summary': '',
+                    'error': (
+                        'Could not decrypt the remote agent credential. '
+                        'Re-enter the API key in Workspace > Subagents.'
+                    ),
+                }
+
+        connection = {
+            'url': remote.get('url'),
+            'type': 'remote_agent',
+            'auth_type': remote.get('auth_type') or 'bearer',
+            'key': key,
+            'headers': remote.get('headers') or {},
+        }
+        try:
+            from open_webui.utils.tools import build_tool_server_headers
+
+            headers, cookies = await build_tool_server_headers(
+                connection,
+                request,
+                user,
+                server_id=run.get('remote_handle') or '',
+                metadata={'chat_id': chat_id, 'message_id': assistant_message_id},
+            )
+        except Exception as exc:
+            return {
+                'status': 'error',
+                'summary': '',
+                'error': f'Could not build remote agent credentials: {exc}',
+            }
+
+        return await invoke_remote_agent(
+            remote=remote,
+            task=task,
+            context=context,
+            headers=headers,
+            cookies=cookies,
+            metadata={
+                'chat_id': chat_id,
+                'parent_chat_id': parent_chat_id,
+                'user_id': user.id,
+                'subagent': run.get('remote_handle'),
+                'system_prompt': run.get('subagent_system_prompt') or '',
+            },
+            ssrf_safe=enforce_ssrf(owner_role),
+            max_output=max_output,
+        )
+
     async def run_reserved() -> dict:
         try:
+            # Remote (Agent-to-Agent) sub-agent: hand the task to an external service and
+            # record its reply on the same assistant message. Returning the usual result
+            # shape keeps every caller (foreground, background, cancellation) unchanged.
+            if run.get('remote'):
+                result = await run_remote()
+                update: dict = {'content': result.get('summary') or '', 'done': True}
+                if result.get('error'):
+                    update['error'] = {'content': result['error']}
+                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                    chat_id, assistant_message_id, update
+                )
+                return result
+
             child_request = _build_request(request, user.id, internal=True)
             child_request.state.max_tool_call_iterations = max_iterations
             custom_subagent_prompt = run.get('subagent_system_prompt')

@@ -11,6 +11,7 @@
 		description?: string;
 		meta?: {
 			description?: string;
+			[key: string]: any;
 		};
 	};
 

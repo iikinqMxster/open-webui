@@ -10,6 +10,7 @@
 		name?: string;
 		description?: string;
 		is_active?: boolean;
+		meta?: { remote?: { enabled?: boolean }; [key: string]: any };
 	};
 
 	export let subagents: Subagent[] = [];
@@ -75,6 +76,9 @@
 								<span class="capitalize">{subagent.name}</span>
 								{#if subagent.handle}
 									<span class="text-gray-400 dark:text-gray-500">{subagent.handle}</span>
+								{/if}
+								{#if subagent.meta?.remote?.enabled}
+									<span class="text-gray-400 dark:text-gray-500">{$i18n.t('Remote')}</span>
 								{/if}
 							</div>
 						</Tooltip>

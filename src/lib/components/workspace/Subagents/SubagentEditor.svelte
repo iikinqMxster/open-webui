@@ -9,7 +9,7 @@
 	import { getSkills } from '$lib/apis/skills';
 	import { getFunctions } from '$lib/apis/functions';
 	import { getModelsDefaults } from '$lib/apis/configs';
-	import { updateSubagentAccessGrants } from '$lib/apis/subagents';
+	import { updateSubagentAccessGrants, verifySubagentRemote } from '$lib/apis/subagents';
 	import { slugify } from '$lib/utils';
 	import { goto } from '$app/navigation';
 
@@ -31,6 +31,7 @@ When done, end with a clear summary:
 	import Tags from '$lib/components/common/Tags.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
+	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
@@ -82,12 +83,53 @@ When done, end with a clear summary:
 	let params = { system: '' };
 	let accessGrants = [];
 
+	// Remote (Agent-to-Agent) delegation: the task is handed to an external agent service
+	// (LangGraph, CrewAI, a custom endpoint) instead of running a local model completion.
+	let remoteEnabled = false;
+	let remoteUrl = '';
+	let remoteProtocol = 'generic';
+	let remoteAuthType = 'bearer';
+	let remoteKey = '';
+	let remoteHasKey = false;
+	let remoteTimeout = 300;
+	let verifying = false;
+
 	// Auto-fill the (user-put) id from the name until the user edits it, mirroring how the
 	// Models/Skills editors derive their id. Prevents an empty id on create.
 	let handleEdited = false;
 	$: if (!edit && !handleEdited) {
 		handle = slugify(name ?? '');
 	}
+
+	const verifyRemoteHandler = async () => {
+		if ((remoteUrl ?? '').trim() === '') {
+			toast.error($i18n.t('A remote agent URL is required.'));
+			return;
+		}
+
+		verifying = true;
+		const res = await verifySubagentRemote(localStorage.token, {
+			url: remoteUrl.trim(),
+			auth_type: remoteAuthType,
+			key: (remoteKey ?? '').trim(),
+			protocol: remoteProtocol,
+			subagent_id: id || undefined
+		}).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		verifying = false;
+
+		if (!res) return;
+		if (res.ok) {
+			toast.success(res?.card?.name ? `${$i18n.t('Connected to')} ${res.card.name}` : $i18n.t('Connection verified'));
+			if (res?.card?.description && (description ?? '').trim() === '') {
+				description = res.card.description;
+			}
+		} else {
+			toast.error(res.error ?? $i18n.t('Could not reach the remote agent.'));
+		}
+	};
 
 	const getBaseModelItems = (modelsList: any[] = []) => {
 		return modelsList
@@ -114,6 +156,10 @@ When done, end with a clear summary:
 			toast.error($i18n.t('Subagent Name is required.'));
 			return;
 		}
+		if (remoteEnabled && (remoteUrl ?? '').trim() === '') {
+			toast.error($i18n.t('A remote agent URL is required.'));
+			return;
+		}
 		if (knowledge.some((item) => item.status === 'uploading')) {
 			toast.error($i18n.t('Please wait until all files are uploaded.'));
 			return;
@@ -121,22 +167,41 @@ When done, end with a clear summary:
 
 		loading = true;
 
-		const meta: any = { tags: tags ?? [], capabilities, filesystemAccess };
-		if (knowledge.length > 0) meta.knowledge = knowledge;
-		if (toolIds.length > 0) meta.toolIds = toolIds;
-		if (skillIds.length > 0) meta.skillIds = skillIds;
-		if (filterIds.length > 0) meta.filterIds = filterIds;
-		if (defaultFilterIds.length > 0) meta.defaultFilterIds = defaultFilterIds;
-		if (actionIds.length > 0) meta.actionIds = actionIds;
-		if (defaultFeatureIds.length > 0) meta.defaultFeatureIds = defaultFeatureIds;
-		if (Object.keys(builtinTools).length > 0) meta.builtinTools = builtinTools;
+		const meta: any = { tags: tags ?? [] };
+
+		if (remoteEnabled) {
+			// A remote agent brings its own model, tools and runtime, so none of the local
+			// execution settings are persisted for it.
+			meta.remote = {
+				enabled: true,
+				url: (remoteUrl ?? '').trim(),
+				protocol: remoteProtocol,
+				auth_type: remoteAuthType,
+				timeout: Number(remoteTimeout) || 300
+			};
+			// An empty key means "keep the stored credential" - the editor never receives it.
+			if ((remoteKey ?? '').trim() !== '') {
+				meta.remote.key = remoteKey.trim();
+			}
+		} else {
+			meta.capabilities = capabilities;
+			meta.filesystemAccess = filesystemAccess;
+			if (knowledge.length > 0) meta.knowledge = knowledge;
+			if (toolIds.length > 0) meta.toolIds = toolIds;
+			if (skillIds.length > 0) meta.skillIds = skillIds;
+			if (filterIds.length > 0) meta.filterIds = filterIds;
+			if (defaultFilterIds.length > 0) meta.defaultFilterIds = defaultFilterIds;
+			if (actionIds.length > 0) meta.actionIds = actionIds;
+			if (defaultFeatureIds.length > 0) meta.defaultFeatureIds = defaultFeatureIds;
+			if (Object.keys(builtinTools).length > 0) meta.builtinTools = builtinTools;
+		}
 		if (suggestionPrompts) meta.suggestion_prompts = suggestionPrompts;
 
 		const info: any = {
 			id,
 			handle: (handle ?? '').trim().toLowerCase().replace(/\s+/g, '-'),
 			name,
-			base_model_id: baseModelId || null,
+			base_model_id: remoteEnabled ? null : baseModelId || null,
 			description: description.trim() === '' ? null : description,
 			meta,
 			params: { ...params, system: system.trim() === '' ? null : system },
@@ -192,6 +257,16 @@ When done, end with a clear summary:
 			filesystemAccess = meta.filesystemAccess ?? false;
 			suggestionPrompts = meta.suggestion_prompts ?? null;
 			tags = meta.tags ?? [];
+
+			const remote = meta.remote ?? {};
+			remoteEnabled = remote.enabled ?? false;
+			remoteUrl = remote.url ?? '';
+			remoteProtocol = remote.protocol ?? 'generic';
+			remoteAuthType = remote.auth_type ?? 'bearer';
+			remoteTimeout = remote.timeout ?? 300;
+			// The server never sends the credential back, only whether one is stored.
+			remoteHasKey = remote.has_key ?? false;
+			remoteKey = '';
 
 			params = { ...(subagent.params ?? {}) };
 			system = params.system ?? '';
@@ -318,24 +393,135 @@ When done, end with a clear summary:
 
 				{#if loaded}
 					<div class="mb-2 flex-1 overflow-auto h-0 px-1">
-						<div class="mb-3">
-							<div class=" text-xs font-normal mb-1 text-gray-500">
-								{$i18n.t('Model')}
-							</div>
-							<ModelSelector
-								id="subagent-base-model"
-								placeholder={$i18n.t('Leave empty to use the task model')}
-								searchPlaceholder={$i18n.t('Search a model')}
-								items={getBaseModelItems($models)}
-								triggerClassName="text-sm"
-								selectionOnly
-								includeHidden={$user?.role === 'admin'}
-								bind:value={baseModelId}
-							/>
-							<div class="text-xs text-gray-500 mt-1">
-								{$i18n.t('Empty uses the task model configured in settings.')}
-							</div>
+						<div class="my-3">
+							<Tooltip
+								className="flex w-full justify-between"
+								content={$i18n.t(
+									'Delegate to an external agent service (LangGraph, CrewAI, or any HTTP agent) instead of running a model here.'
+								)}
+								placement="top-start"
+							>
+								<div class=" self-center text-xs font-normal text-gray-500">
+									{$i18n.t('Remote Agent')}
+								</div>
+								<Switch bind:state={remoteEnabled} />
+							</Tooltip>
 						</div>
+
+						{#if remoteEnabled}
+							<div class="mb-3">
+								<div class=" text-xs font-normal mb-1 text-gray-500">
+									{$i18n.t('Agent URL')}
+								</div>
+								<input
+									class="w-full text-sm bg-transparent outline-hidden py-0.5"
+									type="text"
+									placeholder="https://my-agent.example.com/invoke"
+									aria-label={$i18n.t('Agent URL')}
+									bind:value={remoteUrl}
+									{disabled}
+								/>
+								<div class="text-xs text-gray-500 mt-1">
+									{$i18n.t('The task is POSTed as JSON and the final result is returned.')}
+								</div>
+							</div>
+
+							<div class="mb-3 flex gap-2">
+								<div class="w-1/2">
+									<div class=" text-xs font-normal mb-1 text-gray-500">
+										{$i18n.t('Protocol')}
+									</div>
+									<select
+										class="w-full text-sm bg-transparent outline-hidden py-0.5 dark:text-gray-300"
+										bind:value={remoteProtocol}
+										{disabled}
+									>
+										<option value="generic">{$i18n.t('Generic HTTP')}</option>
+										<option value="a2a">{$i18n.t('A2A (Agent Card)')}</option>
+									</select>
+								</div>
+
+								<div class="w-1/2">
+									<div class=" text-xs font-normal mb-1 text-gray-500">
+										{$i18n.t('Authentication')}
+									</div>
+									<select
+										class="w-full text-sm bg-transparent outline-hidden py-0.5 dark:text-gray-300"
+										bind:value={remoteAuthType}
+										{disabled}
+									>
+										<option value="bearer">{$i18n.t('Bearer')}</option>
+										<option value="none">{$i18n.t('None')}</option>
+										<option value="session">{$i18n.t('Session')}</option>
+									</select>
+								</div>
+							</div>
+
+							{#if remoteAuthType === 'bearer'}
+								<div class="mb-3">
+									<div class=" text-xs font-normal mb-1 text-gray-500">
+										{$i18n.t('API Key')}
+									</div>
+									<SensitiveInput
+										bind:value={remoteKey}
+										placeholder={remoteHasKey
+											? $i18n.t('Leave blank to keep the saved key')
+											: $i18n.t('API Key')}
+										required={false}
+										readOnly={disabled}
+									/>
+								</div>
+							{/if}
+
+							<div class="mb-3 flex items-center justify-between gap-2">
+								<div class="text-xs text-gray-500">
+									{$i18n.t('Timeout (seconds)')}
+								</div>
+								<input
+									class="w-24 text-sm bg-transparent outline-hidden text-right"
+									type="number"
+									min="1"
+									max="1800"
+									bind:value={remoteTimeout}
+									{disabled}
+								/>
+							</div>
+
+							{#if !disabled}
+								<div class="mb-3">
+									<button
+										class="px-3 py-1.5 text-xs font-normal bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 transition rounded-lg flex items-center gap-2"
+										type="button"
+										disabled={verifying}
+										on:click={verifyRemoteHandler}
+									>
+										{$i18n.t('Test connection')}
+										{#if verifying}
+											<Spinner className="size-3" />
+										{/if}
+									</button>
+								</div>
+							{/if}
+						{:else}
+							<div class="mb-3">
+								<div class=" text-xs font-normal mb-1 text-gray-500">
+									{$i18n.t('Model')}
+								</div>
+								<ModelSelector
+									id="subagent-base-model"
+									placeholder={$i18n.t('Leave empty to use the task model')}
+									searchPlaceholder={$i18n.t('Search a model')}
+									items={getBaseModelItems($models)}
+									triggerClassName="text-sm"
+									selectionOnly
+									includeHidden={$user?.role === 'admin'}
+									bind:value={baseModelId}
+								/>
+								<div class="text-xs text-gray-500 mt-1">
+									{$i18n.t('Empty uses the task model configured in settings.')}
+								</div>
+							</div>
+						{/if}
 
 						<div class="mb-3">
 							<div class=" text-xs font-normal mb-2">{$i18n.t('System Prompt')}</div>
@@ -361,152 +547,154 @@ When done, end with a clear summary:
 							/>
 						</div>
 
-						<div class="flex w-full justify-between items-center my-2">
-							<div class=" self-center text-xs font-normal">
-								{$i18n.t('Advanced Params')}
-							</div>
-							<button
-								class="p-1 px-3 text-xs flex rounded-sm transition"
-								type="button"
-								on:click={() => {
-									showAdvanced = !showAdvanced;
-								}}
-							>
-								{#if showAdvanced}
-									<span class="ml-2 self-center">{$i18n.t('Hide')}</span>
-								{:else}
-									<span class="ml-2 self-center">{$i18n.t('Show')}</span>
-								{/if}
-							</button>
-						</div>
-						{#if showAdvanced}
-							<div class="my-2">
-								<AdvancedParams admin={true} custom={true} bind:params />
-							</div>
-						{/if}
-
-						<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-						<div class="my-2">
-							<div class="flex w-full justify-between items-center">
-								<div class=" self-center text-xs font-normal text-gray-500">
-									{$i18n.t('Prompts')}
+						{#if !remoteEnabled}
+							<div class="flex w-full justify-between items-center my-2">
+								<div class=" self-center text-xs font-normal">
+									{$i18n.t('Advanced Params')}
 								</div>
 								<button
-									class="p-1 text-xs flex rounded-sm transition"
+									class="p-1 px-3 text-xs flex rounded-sm transition"
 									type="button"
 									on:click={() => {
-										if ((suggestionPrompts ?? null) === null) {
-											suggestionPrompts = [{ content: '', title: ['', ''] }];
-										} else {
-											suggestionPrompts = null;
-										}
+										showAdvanced = !showAdvanced;
 									}}
 								>
-									{#if (suggestionPrompts ?? null) === null}
-										<span class="ml-2 self-center">{$i18n.t('Default')}</span>
+									{#if showAdvanced}
+										<span class="ml-2 self-center">{$i18n.t('Hide')}</span>
 									{:else}
-										<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
+										<span class="ml-2 self-center">{$i18n.t('Show')}</span>
 									{/if}
 								</button>
 							</div>
-
-							{#if suggestionPrompts}
-								<PromptSuggestions bind:promptSuggestions={suggestionPrompts} />
+							{#if showAdvanced}
+								<div class="my-2">
+									<AdvancedParams admin={true} custom={true} bind:params />
+								</div>
 							{/if}
-						</div>
 
-						<div class="my-4">
-							<Knowledge bind:selectedItems={knowledge} />
-						</div>
+							<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
 
-						<div class="my-4">
-							<ToolsSelector bind:selectedToolIds={toolIds} tools={$tools ?? []} />
-						</div>
-
-						<div class="my-4">
-							<SkillsSelector bind:selectedSkillIds={skillIds} skills={skillsList} />
-						</div>
-
-						{#if ($functions ?? []).filter((func) => func.type === 'filter').length > 0 || ($functions ?? []).filter((func) => func.type === 'action').length > 0}
-							<hr class=" border-gray-100/30 dark:border-gray-850/30 my-4" />
-
-							{#if ($functions ?? []).filter((func) => func.type === 'filter').length > 0}
-								<div class="my-4">
-									<FiltersSelector
-										bind:selectedFilterIds={filterIds}
-										filters={($functions ?? []).filter((func) => func.type === 'filter')}
-									/>
+							<div class="my-2">
+								<div class="flex w-full justify-between items-center">
+									<div class=" self-center text-xs font-normal text-gray-500">
+										{$i18n.t('Prompts')}
+									</div>
+									<button
+										class="p-1 text-xs flex rounded-sm transition"
+										type="button"
+										on:click={() => {
+											if ((suggestionPrompts ?? null) === null) {
+												suggestionPrompts = [{ content: '', title: ['', ''] }];
+											} else {
+												suggestionPrompts = null;
+											}
+										}}
+									>
+										{#if (suggestionPrompts ?? null) === null}
+											<span class="ml-2 self-center">{$i18n.t('Default')}</span>
+										{:else}
+											<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
+										{/if}
+									</button>
 								</div>
 
-								{@const toggleableFilters = ($functions ?? []).filter(
-									(func) =>
-										func.type === 'filter' &&
-										(filterIds.includes(func.id) || func?.is_global) &&
-										func?.meta?.toggle
-								)}
+								{#if suggestionPrompts}
+									<PromptSuggestions bind:promptSuggestions={suggestionPrompts} />
+								{/if}
+							</div>
 
-								{#if toggleableFilters.length > 0}
+							<div class="my-4">
+								<Knowledge bind:selectedItems={knowledge} />
+							</div>
+
+							<div class="my-4">
+								<ToolsSelector bind:selectedToolIds={toolIds} tools={$tools ?? []} />
+							</div>
+
+							<div class="my-4">
+								<SkillsSelector bind:selectedSkillIds={skillIds} skills={skillsList} />
+							</div>
+
+							{#if ($functions ?? []).filter((func) => func.type === 'filter').length > 0 || ($functions ?? []).filter((func) => func.type === 'action').length > 0}
+								<hr class=" border-gray-100/30 dark:border-gray-850/30 my-4" />
+
+								{#if ($functions ?? []).filter((func) => func.type === 'filter').length > 0}
 									<div class="my-4">
-										<DefaultFiltersSelector
-											bind:selectedFilterIds={defaultFilterIds}
-											filters={toggleableFilters}
+										<FiltersSelector
+											bind:selectedFilterIds={filterIds}
+											filters={($functions ?? []).filter((func) => func.type === 'filter')}
+										/>
+									</div>
+
+									{@const toggleableFilters = ($functions ?? []).filter(
+										(func) =>
+											func.type === 'filter' &&
+											(filterIds.includes(func.id) || func?.is_global) &&
+											func?.meta?.toggle
+									)}
+
+									{#if toggleableFilters.length > 0}
+										<div class="my-4">
+											<DefaultFiltersSelector
+												bind:selectedFilterIds={defaultFilterIds}
+												filters={toggleableFilters}
+											/>
+										</div>
+									{/if}
+								{/if}
+
+								{#if ($functions ?? []).filter((func) => func.type === 'action').length > 0}
+									<div class="my-4">
+										<ActionsSelector
+											bind:selectedActionIds={actionIds}
+											actions={($functions ?? []).filter((func) => func.type === 'action')}
 										/>
 									</div>
 								{/if}
 							{/if}
 
-							{#if ($functions ?? []).filter((func) => func.type === 'action').length > 0}
-								<div class="my-4">
-									<ActionsSelector
-										bind:selectedActionIds={actionIds}
-										actions={($functions ?? []).filter((func) => func.type === 'action')}
-									/>
-								</div>
-							{/if}
-						{/if}
+							<hr class=" border-gray-100/30 dark:border-gray-850/30 my-4" />
 
-						<hr class=" border-gray-100/30 dark:border-gray-850/30 my-4" />
-
-						<div class="my-4">
-							<Capabilities bind:capabilities />
-						</div>
-
-						{#if Object.keys(capabilities).filter((key) => capabilities[key]).length > 0}
-							{@const availableFeatures = Object.entries(capabilities)
-								.filter(
-									([key, value]) =>
-										value && ['web_search', 'code_interpreter', 'image_generation'].includes(key)
-								)
-								.map(([key, value]) => key)}
-
-							{#if availableFeatures.length > 0}
-								<div class="my-4">
-									<DefaultFeatures {availableFeatures} bind:featureIds={defaultFeatureIds} />
-								</div>
-							{/if}
-						{/if}
-
-						{#if capabilities.builtin_tools}
 							<div class="my-4">
-								<BuiltinTools bind:builtinTools />
+								<Capabilities bind:capabilities />
+							</div>
+
+							{#if Object.keys(capabilities).filter((key) => capabilities[key]).length > 0}
+								{@const availableFeatures = Object.entries(capabilities)
+									.filter(
+										([key, value]) =>
+											value && ['web_search', 'code_interpreter', 'image_generation'].includes(key)
+									)
+									.map(([key, value]) => key)}
+
+								{#if availableFeatures.length > 0}
+									<div class="my-4">
+										<DefaultFeatures {availableFeatures} bind:featureIds={defaultFeatureIds} />
+									</div>
+								{/if}
+							{/if}
+
+							{#if capabilities.builtin_tools}
+								<div class="my-4">
+									<BuiltinTools bind:builtinTools />
+								</div>
+							{/if}
+
+							<div class="my-4">
+								<Tooltip
+									className="flex w-full justify-between"
+									content={$i18n.t(
+										'Gives the subagent terminal tools using the terminal currently attached to this chat.'
+									)}
+									placement="top-start"
+								>
+									<div class=" self-center text-xs font-normal text-gray-500">
+										{$i18n.t('Filesystem Access')}
+									</div>
+									<Switch bind:state={filesystemAccess} />
+								</Tooltip>
 							</div>
 						{/if}
-
-						<div class="my-4">
-							<Tooltip
-								className="flex w-full justify-between"
-								content={$i18n.t(
-									'Gives the subagent terminal tools using the terminal currently attached to this chat.'
-								)}
-								placement="top-start"
-							>
-								<div class=" self-center text-xs font-normal text-gray-500">
-									{$i18n.t('Filesystem Access')}
-								</div>
-								<Switch bind:state={filesystemAccess} />
-							</Tooltip>
-						</div>
 					</div>
 				{:else}
 					<div class="w-full flex-1 flex justify-center items-center">
