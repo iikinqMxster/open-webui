@@ -516,6 +516,21 @@ class EventDefinitions(BaseModel):
     SKILL_DISABLED: EventDefinition = EventDefinition(
         name='skill.disabled', description='A skill was disabled.', message='Skill disabled'
     )
+    SUBAGENT_CREATED: EventDefinition = EventDefinition(
+        name='subagent.created', description='A subagent was created.', message='Subagent created'
+    )
+    SUBAGENT_UPDATED: EventDefinition = EventDefinition(
+        name='subagent.updated', description='A subagent was updated.', message='Subagent updated'
+    )
+    SUBAGENT_DELETED: EventDefinition = EventDefinition(
+        name='subagent.deleted', description='A subagent was deleted.', message='Subagent deleted'
+    )
+    SUBAGENT_ENABLED: EventDefinition = EventDefinition(
+        name='subagent.enabled', description='A subagent was enabled.', message='Subagent enabled'
+    )
+    SUBAGENT_DISABLED: EventDefinition = EventDefinition(
+        name='subagent.disabled', description='A subagent was disabled.', message='Subagent disabled'
+    )
     PROMPT_CREATED: EventDefinition = EventDefinition(
         name='prompt.created', description='A prompt was created.', message='Prompt created'
     )

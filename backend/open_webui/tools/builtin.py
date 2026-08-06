@@ -1514,6 +1514,7 @@ async def delegate_task(
     task: str,
     context: str = '',
     background: bool = False,
+    subagent_id: str = '',
     __request__: Request = None,
     __user__: dict = None,
     __metadata__: dict = None,
@@ -1521,11 +1522,13 @@ async def delegate_task(
     __message_id__: str = None,
 ) -> str:
     """
-    Delegate focused work to a parallel sub-agent using the current model and tools.
+    Delegate focused work to a parallel sub-agent. By default the sub-agent runs on the
+    configured task model with the default sub-agent prompt, inheriting the current tools.
 
     :param task: The specific task for the sub-agent to complete
     :param context: Relevant context, decisions, or file paths for the task
     :param background: Return immediately and continue this chat when the sub-agent finishes
+    :param subagent_id: Optional id of a pre-configured sub-agent to run instead of the default
     :return: Foreground result text, or a JSON dispatch handle for background work
     """
     if __request__ is None:
@@ -1544,6 +1547,7 @@ async def delegate_task(
         metadata=__metadata__ or {},
         parent_chat_id=__chat_id__ or '',
         parent_message_id=__message_id__,
+        subagent_id=subagent_id,
     )
 
 

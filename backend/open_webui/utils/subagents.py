@@ -17,6 +17,11 @@ from open_webui.models.users import UserModel, Users
 from open_webui.tasks import create_task, has_active_tasks
 from open_webui.utils.auth import create_token
 from open_webui.utils.misc import get_message_list
+from open_webui.utils.remote_agents import (
+    enforce_ssrf,
+    invoke_remote_agent,
+    resolve_remote_config,
+)
 from sqlalchemy import select
 from starlette.datastructures import Headers
 
@@ -277,6 +282,7 @@ async def delegate(
     metadata: dict,
     parent_chat_id: str,
     parent_message_id: str | None,
+    subagent_id: str = '',
 ) -> str:
     global _foreground_semaphore
 
@@ -285,6 +291,8 @@ async def delegate(
         return 'Error: task must not be empty.'
     if not parent_chat_id or not user_data.get('id'):
         return 'Error: chat and user context are required.'
+
+    user = UserModel(**user_data)
 
     config = await Config.get_many(
         'subagents.background_enabled',
@@ -313,21 +321,108 @@ async def delegate(
         and await Config.get('code_interpreter.engine', 'pyodide') != 'jupyter'
     ):
         features.pop('code_interpreter')
+
+    # Resolve the default sub-agent model. Instead of blindly reusing the parent
+    # chat model, prefer the task model configured in settings, falling back to the
+    # parent model when no task model is set (this is exactly what get_task_model_id does).
+    parent_model_id = metadata.get('model_id') or (metadata.get('model') or {}).get('id')
+    models = getattr(request.app.state, 'MODELS', {}) or {}
+    default_model_id = parent_model_id
+    if parent_model_id:
+        from open_webui.utils.task import get_task_model_id
+
+        task_model_config = await Config.get_many('task.model.default', 'task.model.external')
+        default_model_id = get_task_model_id(
+            parent_model_id,
+            task_model_config.get('task.model.default'),
+            task_model_config.get('task.model.external'),
+            models,
+        )
+
+    # Load an explicitly requested pre-configured sub-agent (Workspace > Subagents).
+    subagent = None
+    if subagent_id:
+        from open_webui.models.subagents import Subagents
+
+        # The lead agent references sub-agents by their user-put handle (e.g. "math-agent");
+        # fall back to the internal UUID id for robustness.
+        subagent = await Subagents.get_subagent_by_handle(subagent_id)
+        if not subagent:
+            subagent = await Subagents.get_subagent_by_id(subagent_id)
+        if not subagent or subagent.is_active is False:
+            return f'Error: sub-agent "{subagent_id}" is not available.'
+
     run = {
-        'model_id': metadata.get('model_id') or (metadata.get('model') or {}).get('id'),
+        'model_id': default_model_id,
         'session_id': metadata.get('session_id'),
         'tool_ids': copy.deepcopy(metadata.get('tool_ids') or []),
         'skill_ids': copy.deepcopy(metadata.get('skill_ids') or []),
         'system_prompt': metadata.get('system_prompt'),
+        'subagent_system_prompt': None,
         'tool_servers': [] if background else copy.deepcopy(metadata.get('tool_servers') or []),
         'filter_ids': copy.deepcopy(metadata.get('filter_ids') or []),
         'terminal_id': metadata.get('terminal_id'),
+        # The sub-agent gets its own chat, but shares the parent's terminal session so it
+        # sees the same working directory (and therefore the same files) as the lead agent.
+        'terminal_session_id': metadata.get('terminal_session_id') or parent_chat_id,
         'features': features,
         'files': copy.deepcopy(metadata.get('files') or []),
         'variables': copy.deepcopy(metadata.get('variables') or {}),
         'direct': bool(metadata.get('direct')),
     }
-    if not run.get('model_id'):
+
+    # A pre-configured sub-agent overrides the defaults; each empty field inherits
+    # from the parent chat (and an unset model falls back to the task model above).
+    if subagent:
+        sa_meta = subagent.meta.model_dump() if subagent.meta else {}
+        sa_params = subagent.params.model_dump() if subagent.params else {}
+
+        # A remote (Agent-to-Agent) sub-agent runs on an external service: it brings its own
+        # model, tools and runtime, so none of the local overrides below apply.
+        remote_config = resolve_remote_config(subagent)
+        if remote_config:
+            run['remote'] = remote_config
+            run['remote_owner_id'] = subagent.user_id
+            run['remote_handle'] = subagent.handle or subagent.id
+            if sa_params.get('system'):
+                run['subagent_system_prompt'] = sa_params.get('system')
+            run['terminal_id'] = None
+        else:
+            if subagent.base_model_id and subagent.base_model_id in models:
+                # Honour the sub-agent's configured model only if the delegating user can
+                # actually access it; otherwise fall back to the task-model default so a
+                # pre-configured sub-agent can't be used to reach a restricted model.
+                from open_webui.models.models import Models
+                from open_webui.utils.access_control import check_model_access
+
+                try:
+                    await check_model_access(
+                        user, await Models.get_model_by_id(subagent.base_model_id)
+                    )
+                    run['model_id'] = subagent.base_model_id
+                except Exception:
+                    pass
+            if sa_meta.get('toolIds'):
+                run['tool_ids'] = copy.deepcopy(sa_meta.get('toolIds'))
+            if sa_meta.get('skillIds'):
+                run['skill_ids'] = copy.deepcopy(sa_meta.get('skillIds'))
+            if sa_meta.get('filterIds'):
+                run['filter_ids'] = copy.deepcopy(sa_meta.get('filterIds'))
+            if sa_params.get('system'):
+                run['subagent_system_prompt'] = sa_params.get('system')
+            # Terminal is not independently configurable: the sub-agent only gets terminal
+            # tools when "Filesystem Access" is enabled, and it reuses the parent's terminal.
+            if not sa_meta.get('filesystemAccess'):
+                run['terminal_id'] = None
+            # Carry the full config so the child completion runs as this sub-agent's "model"
+            # (knowledge, builtin tools, capabilities, default features).
+            run['overlay_meta'] = sa_meta
+            run['overlay_params'] = sa_params
+
+    if run.get('remote'):
+        # A remote agent needs no local model; keep a readable label for the chat record.
+        run['model_id'] = run.get('model_id') or f'remote:{run["remote_handle"]}'
+    elif not run.get('model_id'):
         return 'Error: model context is required.'
     if run.get('direct'):
         return 'Error: sub-agents are unavailable for direct connections.'
@@ -350,7 +445,6 @@ async def delegate(
 
     mode = 'background' if background else 'foreground'
     try:
-        user = UserModel(**user_data)
         chat_id = str(uuid4())
         user_message_id = str(uuid4())
         assistant_message_id = str(uuid4())
@@ -410,24 +504,107 @@ async def delegate(
         prefix = 'background ' if background else ''
         return f'Error: failed to create {prefix}sub-agent: {exc}'
 
+    async def run_remote() -> dict:
+        """Invoke a remote (A2A) sub-agent and return the standard result dict."""
+        remote = run['remote']
+
+        # SSRF protection is keyed on the sub-agent OWNER's role, not the caller's, so a
+        # shared sub-agent behaves identically for everyone who can delegate to it.
+        owner_role = None
+        try:
+            owner = await Users.get_user_by_id(run.get('remote_owner_id'))
+            owner_role = owner.role if owner else None
+        except Exception:
+            owner_role = None
+
+        key = ''
+        if remote.get('key_encrypted'):
+            try:
+                from open_webui.utils.oauth import decrypt_data
+
+                key = decrypt_data(remote['key_encrypted']) or ''
+            except Exception:
+                return {
+                    'status': 'error',
+                    'summary': '',
+                    'error': (
+                        'Could not decrypt the remote agent credential. '
+                        'Re-enter the API key in Workspace > Subagents.'
+                    ),
+                }
+
+        connection = {
+            'url': remote.get('url'),
+            'type': 'remote_agent',
+            'auth_type': remote.get('auth_type') or 'bearer',
+            'key': key,
+            'headers': remote.get('headers') or {},
+        }
+        try:
+            from open_webui.utils.tools import build_tool_server_headers
+
+            headers, cookies = await build_tool_server_headers(
+                connection,
+                request,
+                user,
+                server_id=run.get('remote_handle') or '',
+                metadata={'chat_id': chat_id, 'message_id': assistant_message_id},
+            )
+        except Exception as exc:
+            return {
+                'status': 'error',
+                'summary': '',
+                'error': f'Could not build remote agent credentials: {exc}',
+            }
+
+        return await invoke_remote_agent(
+            remote=remote,
+            task=task,
+            context=context,
+            headers=headers,
+            cookies=cookies,
+            metadata={
+                'chat_id': chat_id,
+                'parent_chat_id': parent_chat_id,
+                'user_id': user.id,
+                'subagent': run.get('remote_handle'),
+                'system_prompt': run.get('subagent_system_prompt') or '',
+            },
+            ssrf_safe=enforce_ssrf(owner_role),
+            max_output=max_output,
+        )
+
     async def run_reserved() -> dict:
         try:
+            # Remote (Agent-to-Agent) sub-agent: hand the task to an external service and
+            # record its reply on the same assistant message. Returning the usual result
+            # shape keeps every caller (foreground, background, cancellation) unchanged.
+            if run.get('remote'):
+                result = await run_remote()
+                update: dict = {'content': result.get('summary') or '', 'done': True}
+                if result.get('error'):
+                    update['error'] = {'content': result['error']}
+                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                    chat_id, assistant_message_id, update
+                )
+                return result
+
             child_request = _build_request(request, user.id, internal=True)
             child_request.state.max_tool_call_iterations = max_iterations
-            parent_system_prompt = run.get('system_prompt') or ''
-            subagent_system_prompt = (
+            custom_subagent_prompt = run.get('subagent_system_prompt')
+            default_subagent_prompt = (
                 str(config.get('subagents.system_prompt') or '').strip() or DEFAULT_SUBAGENT_SYSTEM_PROMPT
             )
+            # The sub-agent's system prompt is exclusively the agent's own — the custom prompt
+            # when one is set, otherwise the default. It never inherits the parent chat's or
+            # the base/task model's system prompt.
+            system_content = custom_subagent_prompt or default_subagent_prompt
             form_data = {
                 'model': run['model_id'],
                 'messages': [
                     {
                         'role': 'system',
-                        'content': (
-                            f'{parent_system_prompt}\n\n{subagent_system_prompt}'
-                            if parent_system_prompt
-                            else subagent_system_prompt
-                        ),
+                        'content': system_content,
                     },
                     {'role': 'user', 'content': prompt},
                 ],
@@ -452,8 +629,41 @@ async def delegate(
             }
             if run.get('terminal_id'):
                 form_data['terminal_id'] = run['terminal_id']
+                if run.get('terminal_session_id'):
+                    form_data['terminal_session_id'] = run['terminal_session_id']
             if run.get('tool_servers'):
                 form_data['tool_servers'] = run['tool_servers']
+
+            # For a pre-configured sub-agent, run the completion as if its saved config were
+            # the model: overlay its meta/params onto the base model so knowledge, builtin
+            # tools, capabilities and default features all take effect. chat_completion honours
+            # this overlay only for internal (sub-agent) requests.
+            if run.get('overlay_meta') is not None:
+                base_model = (getattr(request.app.state, 'MODELS', {}) or {}).get(run['model_id'])
+                if base_model:
+                    overlay = copy.deepcopy(base_model)
+                    info = copy.deepcopy(overlay.get('info') or {})
+                    overlay_meta = {**(info.get('meta') or {}), **(run.get('overlay_meta') or {})}
+                    # Terminal isn't independently selectable: capability tracks Filesystem Access
+                    # (run['terminal_id'] is already gated on it) and uses the inherited terminal.
+                    caps = {**(overlay_meta.get('capabilities') or {}), 'terminal': bool(run.get('terminal_id'))}
+                    overlay_meta['capabilities'] = caps
+                    overlay_meta.pop('terminalId', None)
+                    info['meta'] = overlay_meta
+                    overlay['info'] = info
+                    form_data['model_item'] = overlay
+                    overlay_params = {
+                        key: value
+                        for key, value in (run.get('overlay_params') or {}).items()
+                        if key != 'system' and value is not None
+                    }
+                    if overlay_params:
+                        form_data['params'] = overlay_params
+
+            # The agent prompt (system_content above) must be the only system prompt:
+            # neutralize the base/task model's own params.system so chat_completion does
+            # not prepend the model's instructions to the sub-agent.
+            form_data['params'] = {**(form_data.get('params') or {}), 'system': ''}
             await request.app.state.CHAT_COMPLETION_HANDLER(child_request, form_data, user=user)
             message = await Chats.get_message_by_id_and_message_id(chat_id, assistant_message_id)
             if not message:

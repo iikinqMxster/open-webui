@@ -17,6 +17,7 @@
 	import { searchKnowledgeBases } from '$lib/apis/knowledge';
 	import { getPromptItems } from '$lib/apis/prompts';
 	import { getSkillItems } from '$lib/apis/skills';
+	import { getSubagentItems } from '$lib/apis/subagents';
 	import { getToolList } from '$lib/apis/tools';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Sidebar from '$lib/components/icons/Sidebar.svelte';
@@ -50,11 +51,12 @@
 		const canViewKnowledge = $user?.role === 'admin' || $user?.permissions?.workspace?.knowledge;
 		const canViewPrompts = $user?.role === 'admin' || $user?.permissions?.workspace?.prompts;
 		const canViewSkills = $user?.role === 'admin' || $user?.permissions?.workspace?.skills;
+		const canViewSubagents = $user?.role === 'admin' || $user?.permissions?.workspace?.subagents;
 		const canViewTools =
 			$config?.features?.enable_plugins &&
 			($user?.role === 'admin' || $user?.permissions?.workspace?.tools);
 
-		const [modelRes, knowledgeRes, promptRes, skillRes, toolRes] = await Promise.all([
+		const [modelRes, knowledgeRes, promptRes, skillRes, subagentRes, toolRes] = await Promise.all([
 			canViewModels
 				? getModelItems(localStorage.token, null, null, null, null, null, 1).catch(() => null)
 				: null,
@@ -65,6 +67,9 @@
 				? getPromptItems(localStorage.token, null, null, null, null, null, 1).catch(() => null)
 				: null,
 			canViewSkills ? getSkillItems(localStorage.token, null, null, 1).catch(() => null) : null,
+			canViewSubagents
+				? getSubagentItems(localStorage.token, null, null, 1).catch(() => null)
+				: null,
 			canViewTools ? getToolList(localStorage.token).catch(() => null) : null
 		]);
 
@@ -73,6 +78,7 @@
 			knowledge: getCount(knowledgeRes),
 			prompts: getCount(promptRes),
 			skills: getCount(skillRes),
+			subagents: getCount(subagentRes),
 			tools: getCount(toolRes)
 		});
 	};
@@ -97,6 +103,11 @@
 			) {
 				goto('/');
 			} else if ($page.url.pathname.includes('/skills') && !$user?.permissions?.workspace?.skills) {
+				goto('/');
+			} else if (
+				$page.url.pathname.includes('/subagents') &&
+				!$user?.permissions?.workspace?.subagents
+			) {
 				goto('/');
 			}
 		}
@@ -209,6 +220,23 @@
 								<span>{$i18n.t('Skills')}</span>
 								<span class="text-sm opacity-60">
 									{formatCount($workspaceCounts.skills)}
+								</span>
+							</a>
+						{/if}
+
+						{#if $user?.role === 'admin' || $user?.permissions?.workspace?.subagents}
+							<a
+								draggable="false"
+								aria-current={activeWorkspaceSection === 'subagents' ? 'page' : null}
+								class="min-w-fit px-1 text-sm inline-flex items-center gap-1 {activeWorkspaceSection ===
+								'subagents'
+									? 'text-gray-900 dark:text-gray-100'
+									: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+								href="/workspace/subagents"
+							>
+								<span>{$i18n.t('Subagents')}</span>
+								<span class="text-sm opacity-60">
+									{formatCount($workspaceCounts.subagents)}
 								</span>
 							</a>
 						{/if}

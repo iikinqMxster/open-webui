@@ -44,6 +44,7 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.models.chats import Chats
 from open_webui.models.config import Config
 from open_webui.models.groups import Groups
+from open_webui.models.subagents import Subagents
 from open_webui.models.tools import Tools
 from open_webui.models.users import UserModel
 from open_webui.tools.builtin import (
@@ -717,11 +718,42 @@ async def get_builtin_tools(
         pydantic_model = convert_function_to_pydantic_model(func)
         spec = convert_pydantic_model_to_openai_function_spec(pydantic_model)
         spec = clean_openai_tool_schema(spec)
-        if func.__name__ == 'delegate_task' and not config.get('subagents.background_enabled'):
+        if func.__name__ == 'delegate_task':
             parameters = spec.get('parameters', {})
-            parameters.get('properties', {}).pop('background', None)
-            if isinstance(parameters.get('required'), list):
-                parameters['required'] = [name for name in parameters['required'] if name != 'background']
+            properties = parameters.get('properties', {})
+            if not config.get('subagents.background_enabled'):
+                properties.pop('background', None)
+                if isinstance(parameters.get('required'), list):
+                    parameters['required'] = [name for name in parameters['required'] if name != 'background']
+
+            # Surface the sub-agents attached to this model (Workspace > Models) so the lead
+            # agent can pick one by id. When none are attached, drop the param entirely and
+            # delegate_task falls back to the default task model + default sub-agent prompt.
+            attached_ids = (model.get('info', {}).get('meta', {}) or {}).get('subagentIds', []) or []
+            attached_subagents = await Subagents.get_subagents_by_ids(attached_ids) if attached_ids else []
+            if attached_subagents:
+
+                def _catalog_entry(sa) -> str:
+                    # Mark remote (Agent-to-Agent) sub-agents so the lead agent knows the work
+                    # leaves this server and runs on an external service.
+                    meta = sa.meta.model_dump() if sa.meta else {}
+                    remote = (meta or {}).get('remote') or {}
+                    suffix = ' (remote agent)' if isinstance(remote, dict) and remote.get('enabled') else ''
+                    return f'- {sa.handle or sa.id}{suffix}: {sa.description or sa.name}'
+
+                catalog = '\n'.join(_catalog_entry(sa) for sa in attached_subagents)
+                properties['subagent_id'] = {
+                    'type': 'string',
+                    'enum': [sa.handle or sa.id for sa in attached_subagents],
+                    'description': (
+                        'Optional id of a pre-configured sub-agent to run instead of the default '
+                        'task model. Leave empty for the default. Available sub-agents:\n' + catalog
+                    ),
+                }
+            else:
+                properties.pop('subagent_id', None)
+                if isinstance(parameters.get('required'), list):
+                    parameters['required'] = [name for name in parameters['required'] if name != 'subagent_id']
 
         tools_dict[func.__name__] = {
             'tool_id': f'builtin:{func.__name__}',
@@ -1268,9 +1300,11 @@ async def get_terminal_tools(
 
     system_prompt = server_data.get('system_prompt')
 
-    # Use chat_id as the per-session key for cwd tracking
+    # Use chat_id as the per-session key for cwd tracking. A sub-agent runs in its own
+    # chat but must share the parent chat's terminal session, otherwise it starts in the
+    # terminal's default directory instead of the one the parent is working in.
     metadata = extra_params.get('__metadata__', {})
-    session_id = metadata.get('chat_id')
+    session_id = metadata.get('terminal_session_id') or metadata.get('chat_id')
     if session_id:
         headers['X-Session-Id'] = session_id
 
