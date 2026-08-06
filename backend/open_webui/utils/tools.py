@@ -1300,9 +1300,11 @@ async def get_terminal_tools(
 
     system_prompt = server_data.get('system_prompt')
 
-    # Use chat_id as the per-session key for cwd tracking
+    # Use chat_id as the per-session key for cwd tracking. A sub-agent runs in its own
+    # chat but must share the parent chat's terminal session, otherwise it starts in the
+    # terminal's default directory instead of the one the parent is working in.
     metadata = extra_params.get('__metadata__', {})
-    session_id = metadata.get('chat_id')
+    session_id = metadata.get('terminal_session_id') or metadata.get('chat_id')
     if session_id:
         headers['X-Session-Id'] = session_id
 

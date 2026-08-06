@@ -2556,6 +2556,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     tool_ids = form_data.pop('tool_ids', None)
     terminal_id = form_data.pop('terminal_id', None)
+    # Sub-agents run in their own chat but attach to the parent chat's terminal session.
+    terminal_session_id = form_data.pop('terminal_session_id', None)
     files = form_data.pop('files', None)
     form_data.pop('folder_id', None)
 
@@ -2670,6 +2672,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             'tool_ids': tool_ids,
             'skill_ids': skill_ids,
             'terminal_id': terminal_id,
+            'terminal_session_id': terminal_session_id,
             'files': files,
             'features': features,
         }
@@ -2768,7 +2771,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         # Resolve terminal tools if terminal_id is set (outside tool_ids check
         # so system terminals work even when no other tools are selected)
         terminal_capability = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('terminal', True)
-        if terminal_id and terminal_capability:
+        # An internal sub-agent request only carries a terminal_id when delegation already
+        # decided it should have filesystem access, so don't re-gate on the capability flag
+        # of the task model - that belongs to a different model than the parent chat's.
+        is_internal_request = getattr(request.state, 'internal', False) is True
+        if terminal_id and (terminal_capability or is_internal_request):
             try:
                 terminal_result = await get_terminal_tools(
                     request,

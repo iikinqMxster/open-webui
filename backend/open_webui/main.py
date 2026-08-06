@@ -1707,6 +1707,11 @@ async def chat_completion(
 
             # Resolve the model object for this specific model
             resolved_model = request.app.state.MODELS.get(target_model_id, model)
+            # An internal sub-agent request carries a model overlay (form_data['model_item'])
+            # describing the sub-agent's own capabilities, knowledge and built-in tools. The
+            # registry entry for the base model would silently replace it.
+            if is_internal and model_item:
+                resolved_model = model
 
             # Only the first model runs chat-level background tasks;
             # subsequent models only run follow-ups.

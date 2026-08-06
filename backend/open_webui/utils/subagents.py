@@ -362,6 +362,9 @@ async def delegate(
         'tool_servers': [] if background else copy.deepcopy(metadata.get('tool_servers') or []),
         'filter_ids': copy.deepcopy(metadata.get('filter_ids') or []),
         'terminal_id': metadata.get('terminal_id'),
+        # The sub-agent gets its own chat, but shares the parent's terminal session so it
+        # sees the same working directory (and therefore the same files) as the lead agent.
+        'terminal_session_id': metadata.get('terminal_session_id') or parent_chat_id,
         'features': features,
         'files': copy.deepcopy(metadata.get('files') or []),
         'variables': copy.deepcopy(metadata.get('variables') or {}),
@@ -626,6 +629,8 @@ async def delegate(
             }
             if run.get('terminal_id'):
                 form_data['terminal_id'] = run['terminal_id']
+                if run.get('terminal_session_id'):
+                    form_data['terminal_session_id'] = run['terminal_session_id']
             if run.get('tool_servers'):
                 form_data['tool_servers'] = run['tool_servers']
 
